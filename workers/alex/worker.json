@@ -1,0 +1,10 @@
+{
+  "id": "alex",
+  "version": "3.0.0-scaffold",
+  "label": "Alex Content Agency",
+  "description": "Autonomous content worker using the shared kernel plus per-tenant Context API and persistent Gate API.",
+  "runtime": "harbor.workers.alex:AlexWorker",
+  "capabilities": ["read:context", "read:queue", "write:deliverables", "gate:content", "write:batch"],
+  "required_services": ["context-api", "gate-api"],
+  "status": "adapter-scaffold-pending-kernel-reconciliation"
+}

@@ -1,0 +1,161 @@
+{
+  "os_version": "2.0.0",
+  "generated": "2026-07-03T03:37:16Z",
+  "files": [
+    {
+      "path": "spec.md",
+      "version": "2.0.0",
+      "sha256": "8513078360789d2670dac787ae4294e6f0cdc4f7a07289acb8145225782f215a"
+    },
+    {
+      "path": "Alex-Final.md",
+      "version": "2.1.0",
+      "sha256": "e668547499f11221df649d1bceadcb08fea04c566f7195d05cd024131366f275"
+    },
+    {
+      "path": "CLAUDE.md",
+      "version": "-",
+      "sha256": "428438266117cf69b682077b389f787f73054e85bc2cbef49ae01616cf1558e7"
+    },
+    {
+      "path": "README.md",
+      "version": "-",
+      "sha256": "73709d2fc42bfb890fa9f75a25e7cac4472d459bc11993f72c01b5fe12b384b7"
+    },
+    {
+      "path": "ROADMAP.md",
+      "version": "1.0.0",
+      "sha256": "39ae187e5826e4419a5fa4dea2353e7fa1900b9ffacbaa0045cd85d77f6afdb3"
+    },
+    {
+      "path": "skills/audio-scriptwriter.md",
+      "version": "1.1.0",
+      "sha256": "fd0659f1f7a6dbbb154424af21f51331074ff4b39141aabcdcfed894f1feb9c9"
+    },
+    {
+      "path": "skills/blog-writer.md",
+      "version": "1.1.0",
+      "sha256": "2c884134b4a4eb2722b7e3d40c4bca4cb8fc7309e840fc246e13afd467c0bc98"
+    },
+    {
+      "path": "skills/campaign-producer.md",
+      "version": "1.1.0",
+      "sha256": "121e99bfb5ff917aba02289d7af08fa360bbe0c20eecefc2bf57020c8fa22595"
+    },
+    {
+      "path": "skills/channel-briefs.md",
+      "version": "1.1.0",
+      "sha256": "65bbf629650a2bbbb203e768669ebd3011747433e22e991357828fce2b073138"
+    },
+    {
+      "path": "skills/content-performance.md",
+      "version": "1.1.0",
+      "sha256": "be4a3e41b61845bd3f6e976e4c69c61e9a29f0642a695e1d070d3e63cea45dbc"
+    },
+    {
+      "path": "skills/content-repurposer.md",
+      "version": "1.1.0",
+      "sha256": "484fba0cfb3ecec76fb5343e287e7bfee407e15ae2492f82d0689af77a60d15e"
+    },
+    {
+      "path": "skills/content-strategist.md",
+      "version": "1.1.0",
+      "sha256": "5e4ec0f2457faa9cabb9fcd0ae3f0ce681f8a24d080a64c242ebea55f8797162"
+    },
+    {
+      "path": "skills/creative-brief.md",
+      "version": "1.1.0",
+      "sha256": "f28f0d191630c4c6de8ef32cb03c53de01298937edfb7ba28fff0e8e4fd41cd4"
+    },
+    {
+      "path": "skills/editorial-gate.md",
+      "version": "1.1.0",
+      "sha256": "3cd47feb10c5182ad3f029d2adefdc93920ea6c183eeba2d2268caa7c520628e"
+    },
+    {
+      "path": "skills/editorial-voice.md",
+      "version": "1.1.0",
+      "sha256": "443092b5cd48f9fa45407950f5e156abcdf86cb09035dbdcd4fa13c041b61884"
+    },
+    {
+      "path": "skills/email-copywriter.md",
+      "version": "1.1.0",
+      "sha256": "b69097162a8faa583c00e2da5436523b39e4d7f5f52979763de10a0b1a813e39"
+    },
+    {
+      "path": "skills/feature-writer.md",
+      "version": "1.1.0",
+      "sha256": "4d6177ec72da80a326ef22d591fe56b414d26ef990e57abb5c4d5670245327ee"
+    },
+    {
+      "path": "skills/newsletter-writer.md",
+      "version": "1.1.0",
+      "sha256": "1eb2db8d72c5d4779184709f113cc1ce52ab17b4a3b8eaf834651a631c384d3d"
+    },
+    {
+      "path": "skills/seo-brief.md",
+      "version": "1.1.0",
+      "sha256": "ddb97b059136104fcc110276bb87aa059d43e00fc81cbd30e91507a57b4d2ef6"
+    },
+    {
+      "path": "skills/social-content.md",
+      "version": "1.1.0",
+      "sha256": "2755b05e69eb168d3447bd6170425821d90bd3dbdf95cb11f08e6fae6ab4c1dd"
+    },
+    {
+      "path": "skills/story-commissioner.md",
+      "version": "1.1.0",
+      "sha256": "f3614494ec36f142b4bc4259aad879520f0d9108a6b70ca0d38895df7e3256ce"
+    },
+    {
+      "path": "skills/video-scriptwriter.md",
+      "version": "1.1.0",
+      "sha256": "67ccc8e440b06776cd40ced1847302e9f139c330598678dea8ff24ed61928094"
+    },
+    {
+      "path": "engine/generate_manifest.py",
+      "version": "-",
+      "sha256": "3383e50d3c23594aa51dc02829fa9ae378eccaa04a396152b35f5e208198445b"
+    },
+    {
+      "path": "engine/init_client.py",
+      "version": "-",
+      "sha256": "27a3431b3023acc91c598f65e64471ca270ab5c225205ee963597509bca2219f"
+    },
+    {
+      "path": "engine/lint_skills.py",
+      "version": "-",
+      "sha256": "b1f89197b3e07aeb58ebaaa6c80c5d6fb9c56b90dd40533072a5d39385994fd6"
+    },
+    {
+      "path": "engine/runtime.py",
+      "version": "-",
+      "sha256": "383fec95cf7d1a3e0450be0a015e20a7dd35e4963a32c6e494d5964be7b67514"
+    },
+    {
+      "path": "engine/skill_add.py",
+      "version": "-",
+      "sha256": "d198ecc51d424e5b6b8e1886355ddc891cc2c7bf19dc4b607eb60e58add2f6f6"
+    },
+    {
+      "path": "engine/verify.py",
+      "version": "-",
+      "sha256": "2c7605fe0343502a59e7c347b942ef4fbc0ba9cbfad1688a67c4e2126052bda6"
+    },
+    {
+      "path": "templates/morning-report.md",
+      "version": "-",
+      "sha256": "8cff48cd67ab7f2ee0f530bbe06274e77e159bf4314792560c3912c972af2fd5"
+    },
+    {
+      "path": "templates/standing_orders.md",
+      "version": "-",
+      "sha256": "c45ca5fd7a35ebb0c9d552bc322e2ec97595f91604596392b236d05e0cea7636"
+    },
+    {
+      "path": "templates/teammate.md",
+      "version": "-",
+      "sha256": "7890ac9e0d5e809a5dc52be65f653af93d3ef569acdfb1e7f0ba900065ef822b"
+    }
+  ]
+}

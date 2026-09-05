@@ -1,0 +1,11 @@
+{
+  "id": "newsletter-intelligence",
+  "version": "0.1.0",
+  "label": "Newsletter Intelligence",
+  "description": "Pull newsletter performance, interpret the signal, and create a morning action report.",
+  "runtime": "harbor.workers.newsletter_intelligence:NewsletterIntelligenceWorker",
+  "capabilities": ["read:newsletter-metrics", "write:report"],
+  "required_connections": ["beehiiv"],
+  "outputs": ["markdown-report"],
+  "gate": "deterministic-v0.8"
+}
