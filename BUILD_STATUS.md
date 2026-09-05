@@ -17,6 +17,19 @@
 - Implicit fake-data fallback removed; mock mode is explicit test-only behavior.
 - Product/deployment/Codex plans rewritten around real infrastructure.
 
+## Tenant-store hardening completed after the alpha handoff
+
+- Ordered transactional schema migrations with a Postgres startup lock.
+- Tenant/worker-scoped run idempotency instead of one global key namespace.
+- Store-owned tenant configuration and connector metadata updates.
+- Tenant-scoped audit log for tenant, connection, Sprite, and run state changes.
+- Secret-shaped metadata is rejected before it reaches database state or run specs.
+- Inactive tenant keys no longer authenticate.
+- Production/Fly startup fails if `DATABASE_URL` is absent.
+- SQLite migration tests and a real ephemeral-Postgres CI job.
+- Runtime wheel packaging and the Fly control-plane Docker image now build.
+- Sprite wheel upload preserves the valid wheel filename; checkpoint failure is visible.
+
 ## Still required for first live pilot
 
 - Actual Fly credentials/account connection.

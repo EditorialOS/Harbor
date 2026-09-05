@@ -30,8 +30,12 @@ Start with `docs/PRODUCTION_PLAN.md`, then `DEPLOY.md`, then `CODEX_NEXT.md`.
 The only test path allowed to use sample beehiiv data is explicit mock mode.
 
 ```bash
-python -m pytest -q
+python3 -m pip install -e ".[test]"
+python3 -m pytest -q
 ```
+
+Postgres store tests run when `TEST_DATABASE_URL` points to an isolated test
+database. CI supplies an ephemeral PostgreSQL service automatically.
 
 ## Production boundary
 

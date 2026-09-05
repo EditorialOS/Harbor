@@ -14,6 +14,15 @@ dependencies = []
 production = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "psycopg[binary]>=3.2", "sprites-py"]
 mcp = ["mcp"]
 slack = ["flask", "slack-bolt", "slack-sdk"]
+test = ["pytest>=8", "psycopg[binary]>=3.2", "httpx>=0.27"]
 
 [project.scripts]
 harbor = "harbor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["harbor", "harbor.*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "postgres: requires TEST_DATABASE_URL pointing to an isolated Postgres database",
+]

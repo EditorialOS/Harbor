@@ -25,7 +25,7 @@ with tempfile.TemporaryDirectory() as td:
         }]
     }))
     t = load_tenant(p)
-    result = run_worker(t, "newsletter-intelligence")
+    result = run_worker(t, "newsletter-intelligence", {"mode": "mock"})
     assert result.status == "completed", result
     assert Path(result.deliverables[0]).exists()
     text = Path(result.deliverables[0]).read_text()

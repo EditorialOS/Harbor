@@ -1,7 +1,12 @@
 __pycache__/
 *.py[cod]
 .venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
 .env
+harbor.db
 Work/*
 !Work/.gitkeep
 tenants/*/workspace/

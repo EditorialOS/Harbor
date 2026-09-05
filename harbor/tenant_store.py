@@ -1,13 +1,12 @@
-"""Tenant and run state for Harbor's control plane.
+"""Tenant, run, and audit state for Harbor's control plane.
 
 SQLite is supported for local development. Production uses Postgres via
-DATABASE_URL. Tenant JSON contains metadata only: publication ids, connector ids,
-worker settings, schedule, and Sprite name. It must never contain provider
-credentials.
+``DATABASE_URL``. Ordered, transactional migrations are recorded in
+``schema_migrations``.
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass
 import datetime as dt
 import hashlib
 import hmac
@@ -15,14 +14,15 @@ import json
 import os
 import secrets
 import sqlite3
-from typing import Any, Iterable
+from dataclasses import dataclass
+from typing import Any
 
 
 class TenantStoreError(RuntimeError):
     pass
 
 
-@dataclass
+@dataclass(frozen=True)
 class TenantRecord:
     tenant_id: str
     name: str
@@ -32,29 +32,176 @@ class TenantRecord:
     active: bool = True
 
 
-SCHEMA_SQLITE = """
-CREATE TABLE IF NOT EXISTS tenants (
-    tenant_id TEXT PRIMARY KEY,
+@dataclass(frozen=True)
+class AuditRecord:
+    audit_id: str
+    tenant_id: str
+    actor_type: str
+    actor_id: str | None
+    action: str
+    target_type: str
+    target_id: str | None
+    metadata: dict[str, Any]
+    created_at: str
+
+
+LATEST_SCHEMA_VERSION = 3
+
+_SCHEMA_MIGRATIONS_SQLITE = """
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
-    timezone TEXT NOT NULL,
-    sprite_name TEXT,
-    api_key_hash TEXT NOT NULL,
-    config_json TEXT NOT NULL,
-    active INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS runs (
-    run_id TEXT PRIMARY KEY,
-    tenant_id TEXT NOT NULL,
-    worker_id TEXT NOT NULL,
-    idempotency_key TEXT NOT NULL UNIQUE,
-    status TEXT NOT NULL,
-    result_json TEXT,
-    started_at TEXT NOT NULL,
-    finished_at TEXT
-);
+    applied_at TEXT NOT NULL
+)
 """
+
+_SQLITE_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
+    (
+        1,
+        "initial_tenants_and_runs",
+        (
+            """CREATE TABLE IF NOT EXISTS tenants (
+                tenant_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                timezone TEXT NOT NULL,
+                sprite_name TEXT,
+                api_key_hash TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS runs (
+                run_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                worker_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL,
+                result_json TEXT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT
+            )""",
+        ),
+    ),
+    (
+        2,
+        "tenant_scoped_run_idempotency",
+        (
+            "DROP TABLE IF EXISTS runs_v2",
+            """CREATE TABLE runs_v2 (
+                run_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                worker_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                result_json TEXT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                UNIQUE (tenant_id, worker_id, idempotency_key)
+            )""",
+            """INSERT INTO runs_v2
+                (run_id, tenant_id, worker_id, idempotency_key, status,
+                 result_json, started_at, finished_at)
+                SELECT run_id, tenant_id, worker_id, idempotency_key, status,
+                       result_json, started_at, finished_at FROM runs""",
+            "DROP TABLE runs",
+            "ALTER TABLE runs_v2 RENAME TO runs",
+            "CREATE INDEX IF NOT EXISTS runs_tenant_started_idx ON runs (tenant_id, started_at DESC)",
+        ),
+    ),
+    (
+        3,
+        "tenant_audit_log",
+        (
+            """CREATE TABLE IF NOT EXISTS audit_log (
+                audit_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                actor_type TEXT NOT NULL,
+                actor_id TEXT,
+                action TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT,
+                metadata_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS audit_tenant_created_idx ON audit_log (tenant_id, created_at DESC)",
+        ),
+    ),
+)
+
+_POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
+    (
+        1,
+        "initial_tenants_and_runs",
+        (
+            """CREATE TABLE IF NOT EXISTS tenants (
+                tenant_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                timezone TEXT NOT NULL,
+                sprite_name TEXT,
+                api_key_hash TEXT NOT NULL,
+                config_json JSONB NOT NULL,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS runs (
+                run_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                worker_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL,
+                result_json JSONB,
+                started_at TIMESTAMPTZ NOT NULL,
+                finished_at TIMESTAMPTZ
+            )""",
+        ),
+    ),
+    (
+        2,
+        "tenant_scoped_run_idempotency",
+        (
+            "ALTER TABLE runs DROP CONSTRAINT IF EXISTS runs_idempotency_key_key",
+            """CREATE UNIQUE INDEX IF NOT EXISTS runs_tenant_worker_idempotency_uidx
+                ON runs (tenant_id, worker_id, idempotency_key)""",
+            "CREATE INDEX IF NOT EXISTS runs_tenant_started_idx ON runs (tenant_id, started_at DESC)",
+        ),
+    ),
+    (
+        3,
+        "tenant_audit_log",
+        (
+            """CREATE TABLE IF NOT EXISTS audit_log (
+                audit_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                actor_type TEXT NOT NULL,
+                actor_id TEXT,
+                action TEXT NOT NULL,
+                target_type TEXT NOT NULL,
+                target_id TEXT,
+                metadata_json JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS audit_tenant_created_idx ON audit_log (tenant_id, created_at DESC)",
+        ),
+    ),
+)
+
+_FORBIDDEN_SECRET_KEYS = {
+    "api_key",
+    "access_token",
+    "refresh_token",
+    "authorization",
+    "client_secret",
+    "credential",
+    "password",
+    "secret",
+    "token",
+}
+
+
+def _utcnow() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
 
 
 def _hash_key(key: str) -> str:
@@ -65,138 +212,551 @@ def issue_tenant_key() -> str:
     return "harbor_" + secrets.token_urlsafe(32)
 
 
+def _is_secret_key(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    if normalized == "secret_ref":
+        return False
+    return normalized in _FORBIDDEN_SECRET_KEYS or normalized.endswith(
+        ("_api_key", "_access_token", "_refresh_token", "_password", "_secret")
+    )
+
+
+def validate_non_secret_metadata(value: Any, path: str = "metadata") -> None:
+    """Reject plaintext credential-shaped fields before metadata is persisted."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            if _is_secret_key(str(key)) and child not in (None, "", "REDACTED"):
+                raise TenantStoreError(
+                    f"plaintext secret-like field '{child_path}' is not allowed in Harbor state"
+                )
+            validate_non_secret_metadata(child, child_path)
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            validate_non_secret_metadata(child, f"{path}[{index}]")
+
+
 class TenantStore:
     def __init__(self, database_url: str | None = None):
-        self.database_url = database_url or os.environ.get("DATABASE_URL") or "sqlite:///harbor.db"
-        self.kind = "postgres" if self.database_url.startswith(("postgres://", "postgresql://")) else "sqlite"
-        self._init_schema()
+        configured_url = database_url or os.environ.get("DATABASE_URL")
+        production = os.environ.get("HARBOR_ENV", "").lower() == "production" or bool(
+            os.environ.get("FLY_APP_NAME")
+        )
+        if not configured_url and production:
+            raise TenantStoreError(
+                "DATABASE_URL is required in production; SQLite is local-development only"
+            )
+        self.database_url = configured_url or "sqlite:///harbor.db"
+        if self.database_url.startswith(("postgres://", "postgresql://")):
+            self.kind = "postgres"
+        elif self.database_url.startswith("sqlite:///"):
+            self.kind = "sqlite"
+        else:
+            raise TenantStoreError(
+                "unsupported DATABASE_URL; use sqlite:///... or postgresql://..."
+            )
+        self._migrate()
 
     def _sqlite_path(self) -> str:
-        if not self.database_url.startswith("sqlite:///"):
-            raise TenantStoreError("unsupported SQLite URL; use sqlite:///path")
         return self.database_url.removeprefix("sqlite:///")
 
     def _connect(self):
         if self.kind == "sqlite":
             conn = sqlite3.connect(self._sqlite_path())
             conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
             return conn
         try:
             import psycopg  # type: ignore
         except ImportError as e:
-            raise TenantStoreError("Install psycopg[binary] for Postgres production") from e
+            raise TenantStoreError(
+                "Install psycopg[binary] for Postgres production"
+            ) from e
         return psycopg.connect(self.database_url)
 
-    def _init_schema(self) -> None:
-        now = dt.datetime.now(dt.timezone.utc).isoformat()
-        if self.kind == "sqlite":
-            with self._connect() as conn:
-                conn.executescript(SCHEMA_SQLITE)
-            return
-        statements = [
-            """CREATE TABLE IF NOT EXISTS tenants (
-                tenant_id TEXT PRIMARY KEY, name TEXT NOT NULL, timezone TEXT NOT NULL,
-                sprite_name TEXT, api_key_hash TEXT NOT NULL, config_json JSONB NOT NULL,
-                active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL)""",
-            """CREATE TABLE IF NOT EXISTS runs (
-                run_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
-                worker_id TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
-                status TEXT NOT NULL, result_json JSONB, started_at TIMESTAMPTZ NOT NULL,
-                finished_at TIMESTAMPTZ)""",
-        ]
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                for stmt in statements:
-                    cur.execute(stmt)
-            conn.commit()
+    def _migrate(self) -> None:
+        try:
+            if self.kind == "sqlite":
+                self._migrate_sqlite()
+            else:
+                self._migrate_postgres()
+        except TenantStoreError:
+            raise
+        except Exception as e:
+            raise TenantStoreError(f"database migration failed: {e}") from e
 
-    def create_tenant(self, tenant_id: str, name: str, timezone: str, config: dict[str, Any]) -> tuple[TenantRecord, str]:
-        api_key = issue_tenant_key()
-        now = dt.datetime.now(dt.timezone.utc).isoformat()
-        payload = json.dumps(config)
-        if self.kind == "sqlite":
-            with self._connect() as conn:
+    def _migrate_sqlite(self) -> None:
+        with self._connect() as conn:
+            conn.execute(_SCHEMA_MIGRATIONS_SQLITE)
+            conn.execute("BEGIN IMMEDIATE")
+            applied = {
+                row[0] for row in conn.execute("SELECT version FROM schema_migrations")
+            }
+            for version, name, statements in _SQLITE_MIGRATIONS:
+                if version in applied:
+                    continue
+                for statement in statements:
+                    conn.execute(statement)
                 conn.execute(
-                    "INSERT INTO tenants (tenant_id,name,timezone,sprite_name,api_key_hash,config_json,active,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (tenant_id, name, timezone, None, _hash_key(api_key), payload, 1, now, now),
+                    "INSERT INTO schema_migrations (version,name,applied_at) VALUES (?,?,?)",
+                    (version, name, _utcnow()),
                 )
-        else:
-            with self._connect() as conn:
+
+    def _migrate_postgres(self) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtext('harbor_schema_migrations'))"
+            )
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        applied_at TIMESTAMPTZ NOT NULL
+                    )"""
+            )
+            cur.execute("SELECT version FROM schema_migrations")
+            applied = {row[0] for row in cur.fetchall()}
+            for version, name, statements in _POSTGRES_MIGRATIONS:
+                if version in applied:
+                    continue
+                for statement in statements:
+                    cur.execute(statement)
+                cur.execute(
+                    "INSERT INTO schema_migrations (version,name,applied_at) VALUES (%s,%s,%s)",
+                    (version, name, _utcnow()),
+                )
+
+    @property
+    def schema_version(self) -> int:
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
+                ).fetchone()
+            else:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "INSERT INTO tenants (tenant_id,name,timezone,sprite_name,api_key_hash,config_json,active,created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)",
-                        (tenant_id, name, timezone, None, _hash_key(api_key), payload, True, now, now),
+                        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
                     )
-                conn.commit()
+                    row = cur.fetchone()
+        return int(row[0])
+
+    def _insert_audit(
+        self,
+        conn: Any,
+        tenant_id: str,
+        action: str,
+        target_type: str,
+        target_id: str | None = None,
+        *,
+        actor_type: str = "system",
+        actor_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        metadata = metadata or {}
+        validate_non_secret_metadata(metadata, "audit.metadata")
+        values = (
+            "audit_" + secrets.token_hex(16),
+            tenant_id,
+            actor_type,
+            actor_id,
+            action,
+            target_type,
+            target_id,
+            json.dumps(metadata),
+            _utcnow(),
+        )
+        if self.kind == "sqlite":
+            conn.execute(
+                """INSERT INTO audit_log
+                   (audit_id,tenant_id,actor_type,actor_id,action,target_type,target_id,metadata_json,created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                values,
+            )
+        else:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO audit_log
+                       (audit_id,tenant_id,actor_type,actor_id,action,target_type,target_id,metadata_json,created_at)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)""",
+                    values,
+                )
+
+    def create_tenant(
+        self,
+        tenant_id: str,
+        name: str,
+        timezone: str,
+        config: dict[str, Any],
+    ) -> tuple[TenantRecord, str]:
+        validate_non_secret_metadata(config, "tenant.config")
+        api_key = issue_tenant_key()
+        now = _utcnow()
+        payload = json.dumps(config)
+        try:
+            with self._connect() as conn:
+                values = (
+                    tenant_id,
+                    name,
+                    timezone,
+                    None,
+                    _hash_key(api_key),
+                    payload,
+                    True,
+                    now,
+                    now,
+                )
+                if self.kind == "sqlite":
+                    conn.execute(
+                        """INSERT INTO tenants
+                           (tenant_id,name,timezone,sprite_name,api_key_hash,config_json,active,created_at,updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                        values,
+                    )
+                else:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO tenants
+                               (tenant_id,name,timezone,sprite_name,api_key_hash,config_json,active,created_at,updated_at)
+                               VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)""",
+                            values,
+                        )
+                self._insert_audit(
+                    conn, tenant_id, "tenant.created", "tenant", tenant_id
+                )
+        except Exception as e:
+            raise TenantStoreError(f"could not create tenant '{tenant_id}': {e}") from e
         return self.get(tenant_id), api_key
 
     def get(self, tenant_id: str) -> TenantRecord:
-        sql = "SELECT tenant_id,name,timezone,sprite_name,config_json,active FROM tenants WHERE tenant_id = ?" if self.kind == "sqlite" else "SELECT tenant_id,name,timezone,sprite_name,config_json,active FROM tenants WHERE tenant_id = %s"
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        sql = (
+            "SELECT tenant_id,name,timezone,sprite_name,config_json,active "
+            f"FROM tenants WHERE tenant_id = {placeholder}"
+        )
         with self._connect() as conn:
-            cur = conn.execute(sql, (tenant_id,)) if self.kind == "sqlite" else conn.cursor()
-            if self.kind != "sqlite":
-                cur.execute(sql, (tenant_id,))
-            row = cur.fetchone()
+            if self.kind == "sqlite":
+                row = conn.execute(sql, (tenant_id,)).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (tenant_id,))
+                    row = cur.fetchone()
         if not row:
             raise TenantStoreError(f"unknown tenant '{tenant_id}'")
-        config = row[4]
-        if isinstance(config, str):
-            config = json.loads(config)
+        config = json.loads(row[4]) if isinstance(row[4], str) else row[4]
         return TenantRecord(row[0], row[1], row[2], row[3], config, bool(row[5]))
 
     def list_active(self) -> list[TenantRecord]:
-        sql = "SELECT tenant_id FROM tenants WHERE active = 1" if self.kind == "sqlite" else "SELECT tenant_id FROM tenants WHERE active = TRUE"
-        with self._connect() as conn:
-            cur = conn.execute(sql) if self.kind == "sqlite" else conn.cursor()
-            if self.kind != "sqlite":
-                cur.execute(sql)
-            ids = [r[0] for r in cur.fetchall()]
-        return [self.get(i) for i in ids]
-
-    def set_sprite(self, tenant_id: str, sprite_name: str) -> None:
-        now = dt.datetime.now(dt.timezone.utc).isoformat()
-        sql = "UPDATE tenants SET sprite_name=?,updated_at=? WHERE tenant_id=?" if self.kind == "sqlite" else "UPDATE tenants SET sprite_name=%s,updated_at=%s WHERE tenant_id=%s"
+        predicate = "active = 1" if self.kind == "sqlite" else "active = TRUE"
         with self._connect() as conn:
             if self.kind == "sqlite":
-                conn.execute(sql, (sprite_name, now, tenant_id))
+                rows = conn.execute(
+                    f"SELECT tenant_id FROM tenants WHERE {predicate}"
+                ).fetchall()
             else:
                 with conn.cursor() as cur:
-                    cur.execute(sql, (sprite_name, now, tenant_id))
-                conn.commit()
+                    cur.execute(f"SELECT tenant_id FROM tenants WHERE {predicate}")
+                    rows = cur.fetchall()
+        return [self.get(row[0]) for row in rows]
+
+    def update_config(
+        self,
+        tenant_id: str,
+        config: dict[str, Any],
+        *,
+        actor_type: str = "system",
+        actor_id: str | None = None,
+    ) -> TenantRecord:
+        validate_non_secret_metadata(config, "tenant.config")
+        payload = json.dumps(config)
+        now = _utcnow()
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                cur = conn.execute(
+                    "UPDATE tenants SET config_json=?,updated_at=? WHERE tenant_id=?",
+                    (payload, now, tenant_id),
+                )
+                rowcount = cur.rowcount
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE tenants SET config_json=%s::jsonb,updated_at=%s WHERE tenant_id=%s",
+                        (payload, now, tenant_id),
+                    )
+                    rowcount = cur.rowcount
+            if rowcount != 1:
+                raise TenantStoreError(f"unknown tenant '{tenant_id}'")
+            self._insert_audit(
+                conn,
+                tenant_id,
+                "tenant.config.updated",
+                "tenant",
+                tenant_id,
+                actor_type=actor_type,
+                actor_id=actor_id,
+            )
+        return self.get(tenant_id)
+
+    def upsert_connection(
+        self,
+        tenant_id: str,
+        connection: dict[str, Any],
+        *,
+        actor_type: str = "admin_api",
+        actor_id: str | None = None,
+    ) -> TenantRecord:
+        validate_non_secret_metadata(connection, "connection")
+        connection_id = connection.get("id")
+        provider = connection.get("provider")
+        if not connection_id or not provider:
+            raise TenantStoreError("connection id and provider are required")
+
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        select_sql = f"SELECT config_json FROM tenants WHERE tenant_id={placeholder}"
+        if self.kind == "postgres":
+            select_sql += " FOR UPDATE"
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(select_sql, (tenant_id,)).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(select_sql, (tenant_id,))
+                    row = cur.fetchone()
+            if not row:
+                raise TenantStoreError(f"unknown tenant '{tenant_id}'")
+            config = json.loads(row[0]) if isinstance(row[0], str) else dict(row[0])
+            connections = [
+                item
+                for item in config.get("connections", [])
+                if item.get("id") != connection_id
+            ]
+            connections.append(connection)
+            config["connections"] = connections
+            payload = json.dumps(config)
+            now = _utcnow()
+            if self.kind == "sqlite":
+                conn.execute(
+                    "UPDATE tenants SET config_json=?,updated_at=? WHERE tenant_id=?",
+                    (payload, now, tenant_id),
+                )
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE tenants SET config_json=%s::jsonb,updated_at=%s WHERE tenant_id=%s",
+                        (payload, now, tenant_id),
+                    )
+            self._insert_audit(
+                conn,
+                tenant_id,
+                "connection.upserted",
+                "connection",
+                str(connection_id),
+                actor_type=actor_type,
+                actor_id=actor_id,
+                metadata={"provider": provider},
+            )
+        return self.get(tenant_id)
+
+    def set_sprite(
+        self,
+        tenant_id: str,
+        sprite_name: str,
+        *,
+        actor_type: str = "system",
+        actor_id: str | None = None,
+    ) -> None:
+        now = _utcnow()
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                cur = conn.execute(
+                    "UPDATE tenants SET sprite_name=?,updated_at=? WHERE tenant_id=?",
+                    (sprite_name, now, tenant_id),
+                )
+                rowcount = cur.rowcount
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE tenants SET sprite_name=%s,updated_at=%s WHERE tenant_id=%s",
+                        (sprite_name, now, tenant_id),
+                    )
+                    rowcount = cur.rowcount
+            if rowcount != 1:
+                raise TenantStoreError(f"unknown tenant '{tenant_id}'")
+            self._insert_audit(
+                conn,
+                tenant_id,
+                "tenant.sprite.assigned",
+                "sprite",
+                sprite_name,
+                actor_type=actor_type,
+                actor_id=actor_id,
+            )
+
+    def set_active(self, tenant_id: str, active: bool) -> None:
+        now = _utcnow()
+        with self._connect() as conn:
+            value = int(active) if self.kind == "sqlite" else active
+            if self.kind == "sqlite":
+                cur = conn.execute(
+                    "UPDATE tenants SET active=?,updated_at=? WHERE tenant_id=?",
+                    (value, now, tenant_id),
+                )
+                rowcount = cur.rowcount
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE tenants SET active=%s,updated_at=%s WHERE tenant_id=%s",
+                        (value, now, tenant_id),
+                    )
+                    rowcount = cur.rowcount
+            if rowcount != 1:
+                raise TenantStoreError(f"unknown tenant '{tenant_id}'")
+            self._insert_audit(
+                conn,
+                tenant_id,
+                "tenant.activated" if active else "tenant.deactivated",
+                "tenant",
+                tenant_id,
+            )
 
     def verify_api_key(self, tenant_id: str, candidate: str) -> bool:
-        sql = "SELECT api_key_hash FROM tenants WHERE tenant_id=?" if self.kind == "sqlite" else "SELECT api_key_hash FROM tenants WHERE tenant_id=%s"
-        with self._connect() as conn:
-            cur = conn.execute(sql, (tenant_id,)) if self.kind == "sqlite" else conn.cursor()
-            if self.kind != "sqlite":
-                cur.execute(sql, (tenant_id,))
-            row = cur.fetchone()
-        return bool(row and hmac.compare_digest(row[0], _hash_key(candidate)))
-
-    def claim_run(self, run_id: str, tenant_id: str, worker_id: str, idempotency_key: str) -> bool:
-        now = dt.datetime.now(dt.timezone.utc).isoformat()
-        try:
-            if self.kind == "sqlite":
-                with self._connect() as conn:
-                    conn.execute("INSERT INTO runs (run_id,tenant_id,worker_id,idempotency_key,status,started_at) VALUES (?,?,?,?,?,?)", (run_id,tenant_id,worker_id,idempotency_key,"running",now))
-            else:
-                with self._connect() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("INSERT INTO runs (run_id,tenant_id,worker_id,idempotency_key,status,started_at) VALUES (%s,%s,%s,%s,%s,%s)", (run_id,tenant_id,worker_id,idempotency_key,"running",now))
-                    conn.commit()
-            return True
-        except Exception:
-            return False
-
-    def finish_run(self, run_id: str, status: str, result: dict[str, Any]) -> None:
-        now = dt.datetime.now(dt.timezone.utc).isoformat()
-        payload = json.dumps(result)
-        sql = "UPDATE runs SET status=?,result_json=?,finished_at=? WHERE run_id=?" if self.kind == "sqlite" else "UPDATE runs SET status=%s,result_json=%s::jsonb,finished_at=%s WHERE run_id=%s"
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        active = "1" if self.kind == "sqlite" else "TRUE"
+        sql = (
+            f"SELECT api_key_hash FROM tenants "
+            f"WHERE tenant_id={placeholder} AND active={active}"
+        )
         with self._connect() as conn:
             if self.kind == "sqlite":
-                conn.execute(sql, (status, payload, now, run_id))
+                row = conn.execute(sql, (tenant_id,)).fetchone()
             else:
                 with conn.cursor() as cur:
-                    cur.execute(sql, (status, payload, now, run_id))
-                conn.commit()
+                    cur.execute(sql, (tenant_id,))
+                    row = cur.fetchone()
+        return bool(row and hmac.compare_digest(row[0], _hash_key(candidate)))
+
+    def claim_run(
+        self,
+        run_id: str,
+        tenant_id: str,
+        worker_id: str,
+        idempotency_key: str,
+    ) -> bool:
+        now = _utcnow()
+        try:
+            with self._connect() as conn:
+                values = (
+                    run_id,
+                    tenant_id,
+                    worker_id,
+                    idempotency_key,
+                    "running",
+                    now,
+                )
+                if self.kind == "sqlite":
+                    conn.execute(
+                        """INSERT INTO runs
+                           (run_id,tenant_id,worker_id,idempotency_key,status,started_at)
+                           VALUES (?,?,?,?,?,?)""",
+                        values,
+                    )
+                else:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO runs
+                               (run_id,tenant_id,worker_id,idempotency_key,status,started_at)
+                               VALUES (%s,%s,%s,%s,%s,%s)""",
+                            values,
+                        )
+                self._insert_audit(
+                    conn,
+                    tenant_id,
+                    "run.claimed",
+                    "run",
+                    run_id,
+                    metadata={"worker_id": worker_id},
+                )
+            return True
+        except sqlite3.IntegrityError as e:
+            if "runs.tenant_id, runs.worker_id, runs.idempotency_key" in str(e):
+                return False
+            raise TenantStoreError(f"could not claim run '{run_id}': {e}") from e
+        except Exception as e:
+            if self.kind == "postgres":
+                try:
+                    from psycopg.errors import UniqueViolation  # type: ignore
+
+                    if (
+                        isinstance(e, UniqueViolation)
+                        and getattr(e.diag, "constraint_name", None)
+                        == "runs_tenant_worker_idempotency_uidx"
+                    ):
+                        return False
+                except ImportError:
+                    pass
+            if isinstance(e, TenantStoreError):
+                raise
+            raise TenantStoreError(f"could not claim run '{run_id}': {e}") from e
+
+    def finish_run(self, run_id: str, status: str, result: dict[str, Any]) -> None:
+        now = _utcnow()
+        payload = json.dumps(result)
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                cur = conn.execute(
+                    "UPDATE runs SET status=?,result_json=?,finished_at=? WHERE run_id=?",
+                    (status, payload, now, run_id),
+                )
+                rowcount = cur.rowcount
+                tenant_row = conn.execute(
+                    "SELECT tenant_id FROM runs WHERE run_id=?", (run_id,)
+                ).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE runs
+                           SET status=%s,result_json=%s::jsonb,finished_at=%s
+                           WHERE run_id=%s RETURNING tenant_id""",
+                        (status, payload, now, run_id),
+                    )
+                    tenant_row = cur.fetchone()
+                    rowcount = cur.rowcount
+            if rowcount != 1 or not tenant_row:
+                raise TenantStoreError(f"unknown run '{run_id}'")
+            self._insert_audit(
+                conn,
+                tenant_row[0],
+                "run.finished",
+                "run",
+                run_id,
+                metadata={"status": status},
+            )
+
+    def list_audit(self, tenant_id: str, limit: int = 100) -> list[AuditRecord]:
+        if limit < 1 or limit > 500:
+            raise TenantStoreError("audit limit must be between 1 and 500")
+        sql = (
+            "SELECT audit_id,tenant_id,actor_type,actor_id,action,"
+            "target_type,target_id,metadata_json,created_at "
+            + (
+                "FROM audit_log WHERE tenant_id=? ORDER BY created_at DESC LIMIT ?"
+                if self.kind == "sqlite"
+                else "FROM audit_log WHERE tenant_id=%s ORDER BY created_at DESC LIMIT %s"
+            )
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                rows = conn.execute(sql, (tenant_id, limit)).fetchall()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (tenant_id, limit))
+                    rows = cur.fetchall()
+        records = []
+        for row in rows:
+            metadata = json.loads(row[7]) if isinstance(row[7], str) else row[7]
+            created_at = (
+                row[8].isoformat() if hasattr(row[8], "isoformat") else str(row[8])
+            )
+            records.append(AuditRecord(*row[:7], metadata, created_at))
+        return records

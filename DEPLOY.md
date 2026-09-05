@@ -30,6 +30,9 @@ Keep the generated/selected region as deployment configuration rather than tenan
 ## 2. Postgres
 
 Provision/attach Postgres and set `DATABASE_URL` on the app. Harbor uses SQLite only for local development.
+Harbor applies versioned migrations at control-plane startup and aborts startup
+if a migration fails. Back up Postgres before deploying a release with a new
+migration; see `docs/DATABASE_MIGRATIONS.md`.
 
 ## 3. Platform secrets
 

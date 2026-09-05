@@ -6,9 +6,15 @@ Wired to Deck's REAL v2 API (from deployed-agent docs):
 Runs are ASYNC: start, then poll until terminal. Terminal states:
   completed | failed | interaction_required  (last = paused for MFA/verification)
 
-Set DECK_API_KEY to go live. Without it, mock mode returns realistic shapes.
+Set DECK_API_KEY to go live. Mock behavior is available only when a caller
+explicitly opts into developer/test mode.
 """
-import json, os, time, urllib.request, urllib.error
+
+import json
+import os
+import time
+import urllib.error
+import urllib.request
 
 DECK_BASE = os.environ.get("DECK_API_BASE", "https://api.deck.co/v2")
 POLL_SECONDS = int(os.environ.get("DECK_POLL_SECONDS", "5"))
@@ -23,6 +29,7 @@ class DeckError(Exception):
 
 class DeckInteractionRequired(Exception):
     """Run paused for MFA / security question — needs a human, not a retry."""
+
     def __init__(self, run_id, interaction):
         self.run_id, self.interaction = run_id, interaction
         super().__init__(f"interaction required on {run_id}: {interaction}")
@@ -50,16 +57,30 @@ def _get(path):
         raise DeckError("deck_unreachable", str(e))
 
 
-def start_run(task_id: str, input_payload: dict, credential_id: str = None) -> str:
+def start_run(
+    task_id: str,
+    input_payload: dict,
+    credential_id: str | None = None,
+    *,
+    allow_mock: bool = False,
+) -> str:
     """POST a task run. Returns the task_run id. (Async — does not wait.)"""
     if not _live():
-        return _mock_start(task_id, input_payload, credential_id)
+        if allow_mock:
+            return _mock_start(task_id, input_payload, credential_id)
+        raise DeckError(
+            "missing_credential",
+            "DECK_API_KEY is required for live Deck calls; mock mode is explicit only",
+        )
     body = {"input": input_payload}
     if credential_id:
         body["credential_id"] = credential_id
     req = urllib.request.Request(
-        f"{DECK_BASE}/tasks/{task_id}/run", data=json.dumps(body).encode(),
-        headers=_headers(json_body=True), method="POST")
+        f"{DECK_BASE}/tasks/{task_id}/run",
+        data=json.dumps(body).encode(),
+        headers=_headers(json_body=True),
+        method="POST",
+    )
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             resp = json.loads(r.read())
@@ -73,16 +94,22 @@ def start_run(task_id: str, input_payload: dict, credential_id: str = None) -> s
     return run_id
 
 
-def await_run(run_id: str) -> dict:
+def await_run(run_id: str, *, allow_mock: bool = False) -> dict:
     """Poll a task run until terminal. Returns the full run object on completed.
     Raises DeckInteractionRequired on MFA pause, DeckError on failure/timeout."""
     if not _live():
-        return _mock_await(run_id)
+        if allow_mock and run_id in _MOCK_STATE:
+            return _mock_await(run_id)
+        raise DeckError(
+            "missing_credential",
+            "DECK_API_KEY is required for live Deck calls; mock mode is explicit only",
+        )
     for _ in range(POLL_MAX):
         run = _get(f"/task-runs/{run_id}")
         status = run.get("status")
         if status in ("queued", "running"):
-            time.sleep(POLL_SECONDS); continue
+            time.sleep(POLL_SECONDS)
+            continue
         if status == "interaction_required":
             raise DeckInteractionRequired(run_id, run.get("interaction"))
         if status == "completed" and run.get("result") == "success":
@@ -90,15 +117,25 @@ def await_run(run_id: str) -> dict:
                 raise DeckError("deck_no_output", f"completed run has no output: {run}")
             return run
         # failed, or completed-but-not-success
-        raise DeckError("deck_task_failed",
-                        f"status={status} result={run.get('result')} errors={run.get('errors')}")
-    raise DeckError("deck_timeout", f"run {run_id} not terminal after {POLL_MAX*POLL_SECONDS}s")
+        raise DeckError(
+            "deck_task_failed",
+            f"status={status} result={run.get('result')} errors={run.get('errors')}",
+        )
+    raise DeckError(
+        "deck_timeout", f"run {run_id} not terminal after {POLL_MAX * POLL_SECONDS}s"
+    )
 
 
-def run_task(task_id: str, credential_id: str, input_payload: dict) -> dict:
+def run_task(
+    task_id: str,
+    credential_id: str,
+    input_payload: dict,
+    *,
+    allow_mock: bool = False,
+) -> dict:
     """Convenience: start + await. Returns the completed run object."""
-    run_id = start_run(task_id, input_payload, credential_id)
-    return await_run(run_id)
+    run_id = start_run(task_id, input_payload, credential_id, allow_mock=allow_mock)
+    return await_run(run_id, allow_mock=allow_mock)
 
 
 def list_runs(task_id: str) -> list:
@@ -110,27 +147,53 @@ def list_runs(task_id: str) -> list:
 # ---- mock mode ----
 _MOCK_STATE = {}
 
+
 def _mock_start(task_id, input_payload, credential_id):
-    rid = f"trun_mock_{len(_MOCK_STATE)+1}"
+    rid = f"trun_mock_{len(_MOCK_STATE) + 1}"
     # a task id containing 'insight'/'audit'/'bill'/'competitor' picks the sample
     _MOCK_STATE[rid] = (task_id, input_payload)
     return rid
+
 
 def _mock_await(run_id):
     task_id, inp = _MOCK_STATE.get(run_id, ("", {}))
     t = task_id.lower()
     if "insight" in t or "ig" in t:
-        out = {"account": "@mockbrand", "period": inp.get("period", "last_30d"),
-               "followers": 4821, "reach": 18730, "impressions": 44210}
+        out = {
+            "account": "@mockbrand",
+            "period": inp.get("period", "last_30d"),
+            "followers": 4821,
+            "reach": 18730,
+            "impressions": 44210,
+        }
     elif "bill" in t or "util" in t or "account" in t:
-        out = {"vendor": "Duke Energy", "account": "ACM-4021", "amount": 142.50, "due": "2026-05-15"}
+        out = {
+            "vendor": "Duke Energy",
+            "account": "ACM-4021",
+            "amount": 142.50,
+            "due": "2026-05-15",
+        }
     elif "audit" in t or "content" in t:
-        out = {"posts_found": 214, "date_range": "2019..2026", "export_path": "mock://posts.jsonl"}
+        out = {
+            "posts_found": 214,
+            "date_range": "2019..2026",
+            "export_path": "mock://posts.jsonl",
+        }
     elif "compet" in t:
-        out = {"target": inp.get("target", "rival.com"),
-               "changes": [{"type": "pricing", "was": "$49", "now": "$59"}]}
+        out = {
+            "target": inp.get("target", "rival.com"),
+            "changes": [{"type": "pricing", "was": "$49", "now": "$59"}],
+        }
     else:  # e.g. the Instagram POSTER task -> post output shape
         out = {"post_id": "MOCK123", "post_url": "https://instagram.com/p/MOCK123/"}
-    return {"id": run_id, "status": "completed", "result": "success",
-            "task_id": task_id, "runtime_ms": 4523, "output": out, "errors": None,
-            "interaction": None, "_mock": True}
+    return {
+        "id": run_id,
+        "status": "completed",
+        "result": "success",
+        "task_id": task_id,
+        "runtime_ms": 4523,
+        "output": out,
+        "errors": None,
+        "interaction": None,
+        "_mock": True,
+    }

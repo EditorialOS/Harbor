@@ -4,24 +4,30 @@ Deploy this service on a Fly Machine. It owns tenancy/auth/scheduling and
 provisions/dispatches isolated tenant Sprites. It never receives worker secrets
 at run time; provider credentials live in Fly Sprites Connectors.
 """
+
 from __future__ import annotations
 
-import datetime as dt
 import hashlib
-import json
 import os
 import re
 import secrets
 from typing import Any
+from urllib.parse import urlsplit
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException
     from pydantic import BaseModel, Field
 except ImportError as e:  # pragma: no cover
-    raise RuntimeError("Install Harbor's production dependencies to run the control plane") from e
+    raise RuntimeError(
+        "Install Harbor's production dependencies to run the control plane"
+    ) from e
 
 from .sprite_runner import SpriteRunner
-from .tenant_store import TenantStore, TenantStoreError
+from .tenant_store import (
+    TenantStore,
+    TenantStoreError,
+    validate_non_secret_metadata,
+)
 
 app = FastAPI(title="Harbor Control Plane", version="0.9.0-alpha")
 store = TenantStore()
@@ -40,7 +46,9 @@ def _sprite_name(tenant_id: str) -> str:
 def _admin(authorization: str | None = Header(default=None)) -> None:
     expected = os.environ.get("HARBOR_ADMIN_TOKEN")
     if not expected:
-        raise HTTPException(status_code=503, detail="HARBOR_ADMIN_TOKEN is not configured")
+        raise HTTPException(
+            status_code=503, detail="HARBOR_ADMIN_TOKEN is not configured"
+        )
     candidate = (authorization or "").removeprefix("Bearer ")
     if not secrets.compare_digest(candidate, expected):
         raise HTTPException(status_code=401, detail="unauthorized")
@@ -53,24 +61,30 @@ def _tenant_auth(tenant_id: str, authorization: str | None) -> None:
 
 
 class TenantCreate(BaseModel):
-    tenant_id: str = Field(min_length=2, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]+$")
+    tenant_id: str = Field(
+        min_length=2, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]+$"
+    )
     name: str
     timezone: str = "UTC"
-    workers: list[str] = ["newsletter-intelligence"]
-    schedule: dict[str, Any] = {"newsletter-intelligence": {"hour": 6, "minute": 0}}
-    outputs: list[str] = ["files"]
+    workers: list[str] = Field(default_factory=lambda: ["newsletter-intelligence"])
+    schedule: dict[str, Any] = Field(
+        default_factory=lambda: {"newsletter-intelligence": {"hour": 6, "minute": 0}}
+    )
+    outputs: list[str] = Field(default_factory=lambda: ["files"])
 
 
 class ConnectionAttach(BaseModel):
-    provider: str
-    id: str
+    provider: str = Field(
+        min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9._-]*$"
+    )
+    id: str = Field(min_length=1, max_length=255)
     gateway_base_url: str
-    settings: dict[str, Any] = {}
+    settings: dict[str, Any] = Field(default_factory=dict)
 
 
 class RunRequest(BaseModel):
-    input: dict[str, Any] = {}
-    idempotency_key: str | None = None
+    input: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 @app.get("/healthz")
@@ -80,12 +94,23 @@ def healthz():
 
 @app.post("/v1/tenants", dependencies=[Depends(_admin)])
 def create_tenant(req: TenantCreate):
-    config = {"workers": req.workers, "schedule": req.schedule, "outputs": req.outputs, "connections": []}
+    config = {
+        "workers": req.workers,
+        "schedule": req.schedule,
+        "outputs": req.outputs,
+        "connections": [],
+    }
     try:
-        record, api_key = store.create_tenant(req.tenant_id, req.name, req.timezone, config)
-    except Exception as e:
+        record, api_key = store.create_tenant(
+            req.tenant_id, req.name, req.timezone, config
+        )
+    except TenantStoreError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-    return {"tenant_id": record.tenant_id, "api_key": api_key, "next": "provision-sprite"}
+    return {
+        "tenant_id": record.tenant_id,
+        "api_key": api_key,
+        "next": "provision-sprite",
+    }
 
 
 @app.post("/v1/tenants/{tenant_id}/provision-sprite", dependencies=[Depends(_admin)])
@@ -94,9 +119,9 @@ def provision_sprite(tenant_id: str):
         record = store.get(tenant_id)
         sprite_name = record.sprite_name or _sprite_name(tenant_id)
         info = SpriteRunner().provision(sprite_name)
-        store.set_sprite(tenant_id, sprite_name)
+        store.set_sprite(tenant_id, sprite_name, actor_type="admin_api")
         return info
-    except (TenantStoreError, Exception) as e:
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
@@ -106,26 +131,28 @@ def attach_connection(tenant_id: str, req: ConnectionAttach):
 
     The provider credential itself is never accepted by this endpoint.
     """
-    record = store.get(tenant_id)
-    config = dict(record.config)
-    conns = [c for c in config.get("connections", []) if c.get("id") != req.id]
-    conns.append({
+    parsed_gateway = urlsplit(req.gateway_base_url)
+    if parsed_gateway.scheme != "https" or not parsed_gateway.netloc:
+        raise HTTPException(
+            status_code=422, detail="gateway_base_url must be an absolute HTTPS URL"
+        )
+    if parsed_gateway.username or parsed_gateway.password:
+        raise HTTPException(
+            status_code=422, detail="gateway_base_url must not contain credentials"
+        )
+    connection = {
         "id": req.id,
         "provider": req.provider,
-        "settings": {**req.settings, "gateway_base_url": req.gateway_base_url, "auth_mode": "sprite_connector"},
-    })
-    config["connections"] = conns
-    # Minimal metadata update; use direct SQL through the store connection until
-    # the configuration service is split into its own repository layer.
-    payload = json.dumps(config)
-    now = dt.datetime.now(dt.timezone.utc).isoformat()
-    with store._connect() as conn:  # internal, kept in one module for alpha
-        if store.kind == "sqlite":
-            conn.execute("UPDATE tenants SET config_json=?,updated_at=? WHERE tenant_id=?", (payload, now, tenant_id))
-        else:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE tenants SET config_json=%s::jsonb,updated_at=%s WHERE tenant_id=%s", (payload, now, tenant_id))
-            conn.commit()
+        "settings": {
+            **req.settings,
+            "gateway_base_url": req.gateway_base_url,
+            "auth_mode": "sprite_connector",
+        },
+    }
+    try:
+        store.upsert_connection(tenant_id, connection, actor_type="admin_api")
+    except TenantStoreError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return {"tenant_id": tenant_id, "connection": req.id, "provider": req.provider}
 
 
@@ -139,13 +166,30 @@ def tenant_status(tenant_id: str, authorization: str | None = Header(default=Non
         "timezone": record.timezone,
         "sprite_name": record.sprite_name,
         "workers": record.config.get("workers", []),
-        "connections": [{"id": c.get("id"), "provider": c.get("provider")} for c in record.config.get("connections", [])],
+        "connections": [
+            {"id": c.get("id"), "provider": c.get("provider")}
+            for c in record.config.get("connections", [])
+        ],
     }
 
 
 @app.post("/v1/tenants/{tenant_id}/workers/{worker_id}/run")
-def run_worker_remote(tenant_id: str, worker_id: str, req: RunRequest, authorization: str | None = Header(default=None)):
+def run_worker_remote(
+    tenant_id: str,
+    worker_id: str,
+    req: RunRequest,
+    authorization: str | None = Header(default=None),
+):
     _tenant_auth(tenant_id, authorization)
+    try:
+        validate_non_secret_metadata(req.input, "run.input")
+    except TenantStoreError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    if str(req.input.get("mode", "")).lower() == "mock":
+        raise HTTPException(
+            status_code=400,
+            detail="mock mode is available only to local developer/test callers",
+        )
     record = store.get(tenant_id)
     if worker_id not in record.config.get("workers", []):
         raise HTTPException(status_code=403, detail="worker not enabled")
