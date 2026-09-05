@@ -11,6 +11,7 @@ from typing import Any
 from .sprites_client import SpriteError, SpritesClient
 
 _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SPRITE_PYTHON = "/.sprite/bin/python3"
 
 
 class SpriteRunner:
@@ -37,7 +38,13 @@ class SpriteRunner:
         remote_wheel = f"/tmp/{self.wheel_path.name}"
         self.client.write_file(sprite_name, remote_wheel, self.wheel_path.read_bytes())
         self.client.exec(
-            sprite_name, "python3", "-m", "pip", "install", "--upgrade", remote_wheel
+            sprite_name,
+            _SPRITE_PYTHON,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            remote_wheel,
         )
         self.client.exec(
             sprite_name,
@@ -62,7 +69,7 @@ class SpriteRunner:
         )
         output = self.client.exec(
             sprite_name,
-            "python3",
+            _SPRITE_PYTHON,
             "-m",
             "harbor.sprite_entrypoint",
             "--spec",

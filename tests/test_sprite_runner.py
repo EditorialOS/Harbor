@@ -41,6 +41,7 @@ def test_provision_preserves_valid_wheel_filename(tmp_path: Path, monkeypatch):
 
     assert result["sprite_name"] == "tenant-sprite"
     assert client.writes[0][1] == f"/tmp/{wheel.name}"
+    assert client.commands[0][1][0] == "/.sprite/bin/python3"
     assert client.commands[0][1][-1] == f"/tmp/{wheel.name}"
 
 
@@ -79,6 +80,7 @@ def test_run_uses_private_unique_internal_spec_path(monkeypatch, tmp_path: Path)
     assert result["status"] == "completed"
     assert client.writes[0][1] == "/tmp/harbor-runs/run_safe-123.json"
     assert client.writes[0][3] == "0600"
+    assert client.commands[0][1][0] == "/.sprite/bin/python3"
 
 
 def test_run_rejects_path_like_or_missing_run_ids(monkeypatch, tmp_path: Path):
