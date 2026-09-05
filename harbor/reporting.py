@@ -1,4 +1,5 @@
 """File output helpers. Files are date-stamped and never overwritten."""
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -16,7 +17,7 @@ def ensure_workspace(root: str | Path) -> Path:
 
 def write_report(root: str | Path, slug: str, markdown: str, *, now: _dt.datetime | None = None) -> str:
     root = ensure_workspace(root)
-    now = now or _dt.datetime.now()
+    now = now or _dt.datetime.now(_dt.timezone.utc)
     date = now.date().isoformat()
     base = root / "Work" / "reports" / f"{date}-{slug}.md"
     path = base

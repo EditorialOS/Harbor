@@ -5,9 +5,14 @@ case Harbor sends no Authorization header because the connector injects the
 provider credential. Direct API-key mode remains available only for local/dev.
 Mock data is opt-in; production never silently substitutes fake metrics.
 """
+
 from __future__ import annotations
 
-import json, os, urllib.request, urllib.error, urllib.parse
+import json
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
 
 BEEHIIV_BASE = os.environ.get("BEEHIIV_API_BASE", "https://api.beehiiv.com/v2")
 

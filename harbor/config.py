@@ -4,10 +4,11 @@ Harbor v0.8 keeps customer variation in tenant config and worker manifests.
 Secrets are references, never values. This is the first concrete step from the
 single-workspace v0.7 build toward the multi-tenant runtime described by Alex v3.
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 

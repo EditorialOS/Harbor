@@ -1,5 +1,5 @@
-from pathlib import Path
 import json
+from pathlib import Path
 
 from harbor.config import ConfigError, load_tenant
 from harbor.runtime import run_worker
@@ -8,18 +8,24 @@ from harbor.worker import catalog
 
 def _tenant(tmp_path: Path) -> Path:
     p = tmp_path / "config.json"
-    p.write_text(json.dumps({
-        "tenant_id": "test",
-        "name": "Test Newsletter",
-        "workspace": "workspace",
-        "workers": ["newsletter-intelligence"],
-        "connections": [{
-            "id": "bee",
-            "provider": "beehiiv",
-            "secret_ref": "env:THIS_SHOULD_NOT_EXIST_HARBOR_TEST",
-            "settings": {"publication_id": "pub_test", "recent_posts": 3}
-        }]
-    }))
+    p.write_text(
+        json.dumps(
+            {
+                "tenant_id": "test",
+                "name": "Test Newsletter",
+                "workspace": "workspace",
+                "workers": ["newsletter-intelligence"],
+                "connections": [
+                    {
+                        "id": "bee",
+                        "provider": "beehiiv",
+                        "secret_ref": "env:THIS_SHOULD_NOT_EXIST_HARBOR_TEST",
+                        "settings": {"publication_id": "pub_test", "recent_posts": 3},
+                    }
+                ],
+            }
+        )
+    )
     return p
 
 
@@ -40,13 +46,35 @@ def test_newsletter_worker_mock_end_to_end(tmp_path):
     assert "Development mode" in text
 
 
+def test_control_plane_run_id_propagates_to_worker_artifacts(tmp_path):
+    tenant = load_tenant(_tenant(tmp_path))
+    result = run_worker(
+        tenant,
+        "newsletter-intelligence",
+        {
+            "mode": "mock",
+            "_harbor_run_id": "run_control_plane_123",
+            "_harbor_idempotency_key_hash": "digest-123",
+        },
+    )
+    assert result.data["runtime"]["run_id"] == "run_control_plane_123"
+    assert result.data["runtime"]["idempotency_key_hash"] == "digest-123"
+    run_record = json.loads(Path(result.data["run_record"]).read_text())
+    assert run_record["run_id"] == "run_control_plane_123"
+    assert run_record["idempotency_key_hash"] == "digest-123"
+
+
 def test_plaintext_secret_is_rejected(tmp_path):
     p = tmp_path / "bad.json"
-    p.write_text(json.dumps({
-        "tenant_id": "bad",
-        "name": "Bad",
-        "connections": [{"provider": "beehiiv", "api_key": "secret-value"}]
-    }))
+    p.write_text(
+        json.dumps(
+            {
+                "tenant_id": "bad",
+                "name": "Bad",
+                "connections": [{"provider": "beehiiv", "api_key": "secret-value"}],
+            }
+        )
+    )
     try:
         load_tenant(p)
     except ConfigError as e:

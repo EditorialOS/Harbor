@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 from .sprites_client import SpriteError, SpritesClient
+
+_RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 class SpriteRunner:
@@ -26,11 +29,11 @@ class SpriteRunner:
             )
 
     def provision(self, sprite_name: str) -> dict[str, Any]:
-        info = self.client.create_sprite(sprite_name)
         if not self.wheel_path.exists():
             raise SpriteError(
-                f"runtime wheel not found at {self.wheel_path}; production image must include HARBOR_RUNTIME_WHEEL"
+                f"runtime wheel not found at {self.wheel_path}; production image must contain exactly one wheel in HARBOR_RUNTIME_WHEEL_DIR"
             )
+        info = self.client.create_sprite(sprite_name)
         remote_wheel = f"/tmp/{self.wheel_path.name}"
         self.client.write_file(sprite_name, remote_wheel, self.wheel_path.read_bytes())
         self.client.exec(
@@ -47,8 +50,16 @@ class SpriteRunner:
         return {"sprite_name": info.name, "url": info.url, "status": info.status}
 
     def run(self, sprite_name: str, run_spec: dict[str, Any]) -> dict[str, Any]:
-        spec_path = "/tmp/harbor-run.json"
-        self.client.write_file(sprite_name, spec_path, json.dumps(run_spec).encode())
+        run_id = run_spec.get("run_id")
+        if not isinstance(run_id, str) or not _RUN_ID_PATTERN.fullmatch(run_id):
+            raise SpriteError("run spec contains a missing or invalid run_id")
+        spec_path = f"/tmp/harbor-runs/{run_id}.json"
+        self.client.write_file(
+            sprite_name,
+            spec_path,
+            json.dumps(run_spec).encode(),
+            mode="0600",
+        )
         output = self.client.exec(
             sprite_name,
             "python3",

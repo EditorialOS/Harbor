@@ -190,6 +190,11 @@ def run_worker_remote(
             status_code=400,
             detail="mock mode is available only to local developer/test callers",
         )
+    if any(str(key).startswith("_harbor_") for key in req.input):
+        raise HTTPException(
+            status_code=400,
+            detail="run input contains a reserved Harbor field",
+        )
     record = store.get(tenant_id)
     if worker_id not in record.config.get("workers", []):
         raise HTTPException(status_code=403, detail="worker not enabled")
@@ -202,6 +207,8 @@ def run_worker_remote(
         raise HTTPException(status_code=409, detail="duplicate idempotency key")
 
     run_spec = {
+        "run_id": run_id,
+        "idempotency_key_hash": hashlib.sha256(idem.encode()).hexdigest(),
         "tenant_id": record.tenant_id,
         "name": record.name,
         "timezone": record.timezone,
@@ -215,8 +222,14 @@ def run_worker_remote(
     }
     try:
         result = SpriteRunner().run(record.sprite_name, run_spec)
-        store.finish_run(run_id, result.get("status", "completed"), result)
-        return {"run_id": run_id, "result": result}
     except Exception as e:
         store.finish_run(run_id, "failed", {"error": str(e)})
         raise HTTPException(status_code=502, detail=str(e)) from e
+    result_status = result.get("status", "failed")
+    store.finish_run(run_id, result_status, result)
+    if result_status != "completed":
+        raise HTTPException(
+            status_code=502,
+            detail={"run_id": run_id, "worker_status": result_status},
+        )
+    return {"run_id": run_id, "result": result}

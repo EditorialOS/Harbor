@@ -1,10 +1,11 @@
-import json, os, tempfile
+import json
+import tempfile
 from pathlib import Path
 
+from harbor import mcp_server
 from harbor.config import ConfigError, load_tenant
 from harbor.runtime import run_worker
 from harbor.worker import catalog
-from harbor import mcp_server
 
 assert "newsletter-intelligence" in catalog()
 assert "newsletter-intelligence" in mcp_server.harbor_worker_catalog()

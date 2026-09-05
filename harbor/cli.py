@@ -2,9 +2,12 @@
 
 Legacy intake commands remain. v0.8 adds the worker runtime and tenant config.
 """
+
 from __future__ import annotations
 
-import argparse, json, sys
+import argparse
+import json
+import sys
 from dataclasses import asdict
 
 from . import core, deck_client

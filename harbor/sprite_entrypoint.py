@@ -4,11 +4,12 @@ The control plane sends non-secret run metadata. Provider auth is performed by a
 Fly Sprite Connector, so no customer API key is present in the run spec or the
 Sprite filesystem.
 """
+
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 from .config import ConnectionConfig, TenantConfig
@@ -46,7 +47,10 @@ def main() -> None:
     args = ap.parse_args()
     spec = json.loads(Path(args.spec).read_text())
     tenant = tenant_from_spec(spec)
-    result = run_worker(tenant, spec["worker"], spec.get("input") or {})
+    worker_input = dict(spec.get("input") or {})
+    worker_input["_harbor_run_id"] = spec["run_id"]
+    worker_input["_harbor_idempotency_key_hash"] = spec.get("idempotency_key_hash")
+    result = run_worker(tenant, spec["worker"], worker_input)
     print(json.dumps(asdict(result), default=str))
 
 

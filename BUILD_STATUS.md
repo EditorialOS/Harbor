@@ -7,11 +7,12 @@
 - Postgres production tenant store with SQLite local mode.
 - Hashed tenant API keys.
 - Run idempotency records.
-- Sprites API adapter for lifecycle/filesystem calls.
-- Official `sprites-py` exec path.
+- Official `sprites-py` lifecycle, paginated listing, filesystem, exec, and
+  checkpoint paths behind Harbor's infrastructure adapter.
 - Programmatic tenant Sprite provisioning.
 - Runtime wheel is uploaded from the control-plane release into the Sprite; no per-customer source edits.
-- Persistent `/workspace` creation and post-install checkpoint attempt.
+- Persistent `/workspace` creation and a required successful post-install
+  checkpoint.
 - Non-secret run spec and in-Sprite worker entrypoint.
 - Newsletter Intelligence can call beehiiv through a Fly Connector gateway.
 - Implicit fake-data fallback removed; mock mode is explicit test-only behavior.
@@ -29,6 +30,8 @@
 - SQLite migration tests and a real ephemeral-Postgres CI job.
 - Runtime wheel packaging and the Fly control-plane Docker image now build.
 - Sprite wheel upload preserves the valid wheel filename; checkpoint failure is visible.
+- Sprite run specs now use a Harbor-generated run id, a unique internal path,
+  and mode-0600 permissions; the same run id reaches worker artifacts.
 
 ## Still required for first live pilot
 
