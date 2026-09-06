@@ -38,6 +38,29 @@ def test_postgres_migrations_scoping_and_audit(postgres_store: TenantStore):
     assert postgres_store.claim_run(
         f"run-b-{suffix}", tenant_b, "newsletter-intelligence", "same-window"
     )
+    scheduled_run = f"run-scheduled-{suffix}"
+    scheduled_window = f"schedule-v1:2026-09-06:0600:UTC:{suffix}"
+    assert postgres_store.claim_run(
+        scheduled_run,
+        tenant_a,
+        "newsletter-intelligence",
+        scheduled_window,
+    )
+    postgres_store.begin_run_attempt(scheduled_run)
+    postgres_store.finish_run(scheduled_run, "completed", {"status": "completed"})
+    postgres_store.update_worker_schedule(
+        tenant_a,
+        "newsletter-intelligence",
+        {"hour": 7, "minute": 30},
+        "UTC",
+        "2026-09-07T07:30:00+00:00",
+    )
+    state = postgres_store.get_schedule_state(tenant_a, "newsletter-intelligence")
+    assert state is not None
+    assert state.last_run_id == scheduled_run
+    assert state.last_window_key == scheduled_window
+    assert state.last_status == "completed"
+    assert state.attempt_count == 1
     assert "run.claimed" in {
         event.action for event in postgres_store.list_audit(tenant_a)
     }

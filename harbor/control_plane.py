@@ -281,12 +281,7 @@ def update_worker_schedule(
             worker_id,
             {"hour": req.hour, "minute": req.minute},
             timezone,
-        )
-        store.upsert_schedule_state(
-            tenant_id,
-            worker_id,
-            next_run_at=next_at.isoformat(),
-            last_status="scheduled",
+            next_at.isoformat(),
         )
     except (TenantStoreError, ValueError) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error

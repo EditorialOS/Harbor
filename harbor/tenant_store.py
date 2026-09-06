@@ -637,6 +637,7 @@ class TenantStore:
         worker_id: str,
         schedule: dict[str, Any],
         timezone: str,
+        next_run_at: str,
         *,
         actor_type: str = "tenant_api",
         actor_id: str | None = None,
@@ -669,9 +670,38 @@ class TenantStore:
                     "UPDATE tenants SET timezone=?,config_json=?,updated_at=? WHERE tenant_id=?",
                     (timezone, payload, now, tenant_id),
                 )
-                conn.execute(
-                    "DELETE FROM schedule_state WHERE tenant_id=? AND worker_id=?",
+                latest = conn.execute(
+                    """SELECT run_id,idempotency_key,status,attempt_count,last_error
+                       FROM runs WHERE tenant_id=? AND worker_id=?
+                         AND idempotency_key LIKE 'schedule-v1:%'
+                       ORDER BY started_at DESC LIMIT 1""",
                     (tenant_id, worker_id),
+                ).fetchone()
+                state_values = (
+                    tenant_id,
+                    worker_id,
+                    next_run_at,
+                    latest[1] if latest else None,
+                    latest[0] if latest else None,
+                    latest[2] if latest else "scheduled",
+                    int(latest[3]) if latest else 0,
+                    latest[4] if latest else None,
+                    now,
+                )
+                conn.execute(
+                    """INSERT INTO schedule_state
+                       (tenant_id,worker_id,next_run_at,last_window_key,last_run_id,
+                        last_status,attempt_count,last_error,updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(tenant_id,worker_id) DO UPDATE SET
+                         next_run_at=excluded.next_run_at,
+                         last_window_key=excluded.last_window_key,
+                         last_run_id=excluded.last_run_id,
+                         last_status=excluded.last_status,
+                         attempt_count=excluded.attempt_count,
+                         last_error=excluded.last_error,
+                         updated_at=excluded.updated_at""",
+                    state_values,
                 )
             else:
                 with conn.cursor() as cur:
@@ -681,8 +711,38 @@ class TenantStore:
                         (timezone, payload, now, tenant_id),
                     )
                     cur.execute(
-                        "DELETE FROM schedule_state WHERE tenant_id=%s AND worker_id=%s",
+                        """SELECT run_id,idempotency_key,status,attempt_count,last_error
+                           FROM runs WHERE tenant_id=%s AND worker_id=%s
+                             AND idempotency_key LIKE 'schedule-v1:%%'
+                           ORDER BY started_at DESC LIMIT 1""",
                         (tenant_id, worker_id),
+                    )
+                    latest = cur.fetchone()
+                    state_values = (
+                        tenant_id,
+                        worker_id,
+                        next_run_at,
+                        latest[1] if latest else None,
+                        latest[0] if latest else None,
+                        latest[2] if latest else "scheduled",
+                        int(latest[3]) if latest else 0,
+                        latest[4] if latest else None,
+                        now,
+                    )
+                    cur.execute(
+                        """INSERT INTO schedule_state
+                           (tenant_id,worker_id,next_run_at,last_window_key,last_run_id,
+                            last_status,attempt_count,last_error,updated_at)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                           ON CONFLICT(tenant_id,worker_id) DO UPDATE SET
+                             next_run_at=EXCLUDED.next_run_at,
+                             last_window_key=EXCLUDED.last_window_key,
+                             last_run_id=EXCLUDED.last_run_id,
+                             last_status=EXCLUDED.last_status,
+                             attempt_count=EXCLUDED.attempt_count,
+                             last_error=EXCLUDED.last_error,
+                             updated_at=EXCLUDED.updated_at""",
+                        state_values,
                     )
             self._insert_audit(
                 conn,

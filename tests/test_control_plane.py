@@ -200,6 +200,31 @@ def test_tenant_can_update_schedule_and_timezone(tmp_path, monkeypatch):
     assert error.value.status_code == 400
 
 
+def test_schedule_change_preserves_latest_scheduled_run_history(tmp_path, monkeypatch):
+    store, key = _tenant_store(tmp_path)
+    monkeypatch.setattr(control_plane, "store", store)
+    window = "schedule-v1:2026-09-06:0600:UTC"
+    assert store.claim_run(
+        "run_scheduled", "acme", "newsletter-intelligence", window
+    )
+    store.begin_run_attempt("run_scheduled")
+    store.finish_run("run_scheduled", "completed", {"status": "completed"})
+
+    control_plane.update_worker_schedule(
+        "acme",
+        "newsletter-intelligence",
+        control_plane.ScheduleUpdate(hour=8, minute=15),
+        authorization=f"Bearer {key}",
+    )
+
+    state = store.get_schedule_state("acme", "newsletter-intelligence")
+    assert state is not None
+    assert state.last_run_id == "run_scheduled"
+    assert state.last_window_key == window
+    assert state.last_status == "completed"
+    assert state.attempt_count == 1
+
+
 def test_tenant_creation_rejects_invalid_schedule_before_persisting(
     tmp_path, monkeypatch
 ):
