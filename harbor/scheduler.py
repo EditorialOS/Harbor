@@ -78,6 +78,7 @@ class Scheduler:
         retry_delay_seconds: float = 2,
         sleeper=time.sleep,
         delivery_handler=None,
+        run_lease_seconds: int = 1800,
     ):
         self.store = store
         self.runner = runner
@@ -85,6 +86,7 @@ class Scheduler:
         self.retry_delay_seconds = retry_delay_seconds
         self.sleeper = sleeper
         self.delivery_handler = delivery_handler
+        self.run_lease_seconds = run_lease_seconds
 
     def _initialize(
         self,
@@ -175,6 +177,7 @@ class Scheduler:
                         retry_delay_seconds=self.retry_delay_seconds,
                         sleeper=self.sleeper,
                         delivery_handler=self.delivery_handler,
+                        run_lease_seconds=self.run_lease_seconds,
                     )
                 except DuplicateRun as error:
                     run = error.record
@@ -268,6 +271,7 @@ def main() -> None:
     poll_seconds = max(10, int(os.environ.get("HARBOR_SCHEDULER_POLL_SECONDS", "30")))
     max_attempts = int(os.environ.get("HARBOR_SCHEDULER_MAX_ATTEMPTS", "3"))
     retry_delay = float(os.environ.get("HARBOR_SCHEDULER_RETRY_DELAY_SECONDS", "2"))
+    run_lease_seconds = int(os.environ.get("HARBOR_RUN_LEASE_SECONDS", "1800"))
     store = TenantStore()
     runner = SpriteRunner()
     scheduler = Scheduler(
@@ -276,6 +280,7 @@ def main() -> None:
         max_attempts=max_attempts,
         retry_delay_seconds=retry_delay,
         delivery_handler=DeliveryCoordinator(store, runner).deliver,
+        run_lease_seconds=run_lease_seconds,
     )
     while True:
         for event in scheduler.tick():

@@ -130,3 +130,79 @@ def test_dispatch_retries_delivery_with_same_run_and_worker_spec(tmp_path):
     assert delivery_calls == [run_id, run_id]
     assert result["attempts"] == 2
     assert result["deliveries"][0]["status"] == "delivered"
+
+
+def test_dispatch_recovers_expired_run_lease_with_original_run_id(tmp_path):
+    store, tenant = _store_and_tenant(tmp_path)
+    assert store.claim_run(
+        "run_interrupted",
+        "acme",
+        "newsletter-intelligence",
+        "interrupted-window",
+        lease_seconds=60,
+    )
+    store.begin_run_attempt("run_interrupted", lease_seconds=60)
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE runs SET lease_expires_at=? WHERE run_id=?",
+            ("2020-01-01T00:00:00+00:00", "run_interrupted"),
+        )
+
+    class Runner:
+        def __init__(self):
+            self.run_ids = []
+
+        def run(self, sprite_name, run_spec):
+            self.run_ids.append(run_spec["run_id"])
+            return {"status": "completed", "summary": "recovered"}
+
+    runner = Runner()
+    run_id, result = dispatch_worker(
+        store,
+        runner,
+        tenant,
+        "newsletter-intelligence",
+        {},
+        "interrupted-window",
+        max_attempts=3,
+        run_lease_seconds=60,
+    )
+
+    assert run_id == "run_interrupted"
+    assert runner.run_ids == ["run_interrupted"]
+    assert result["attempts"] == 2
+    record = store.get_run_by_idempotency(
+        "acme", "newsletter-intelligence", "interrupted-window"
+    )
+    assert record is not None
+    assert record.status == "completed"
+    assert record.attempt_count == 2
+    assert record.lease_expires_at is None
+    assert "run.reclaimed" in {
+        event.action for event in store.list_audit("acme")
+    }
+
+
+def test_dispatch_does_not_recover_an_unexpired_run(tmp_path):
+    store, tenant = _store_and_tenant(tmp_path)
+    assert store.claim_run(
+        "run_active",
+        "acme",
+        "newsletter-intelligence",
+        "active-window",
+        lease_seconds=3600,
+    )
+
+    with pytest.raises(DuplicateRun) as error:
+        dispatch_worker(
+            store,
+            object(),
+            tenant,
+            "newsletter-intelligence",
+            {},
+            "active-window",
+            run_lease_seconds=3600,
+        )
+
+    assert error.value.record is not None
+    assert error.value.record.run_id == "run_active"

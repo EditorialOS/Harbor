@@ -57,6 +57,7 @@ class RunRecord:
     finished_at: str | None
     attempt_count: int
     last_error: str | None
+    lease_expires_at: str | None
 
 
 @dataclass(frozen=True)
@@ -89,7 +90,7 @@ class DeliveryRecord:
     delivered_at: str | None
 
 
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 6
 
 _SCHEMA_MIGRATIONS_SQLITE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -214,6 +215,14 @@ _SQLITE_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS deliveries_tenant_created_idx ON deliveries (tenant_id, created_at DESC)",
         ),
     ),
+    (
+        6,
+        "recoverable_run_leases",
+        (
+            "ALTER TABLE runs ADD COLUMN lease_expires_at TEXT",
+            "UPDATE runs SET lease_expires_at=started_at WHERE status='running'",
+        ),
+    ),
 )
 
 _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
@@ -316,6 +325,14 @@ _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS deliveries_tenant_created_idx ON deliveries (tenant_id, created_at DESC)",
         ),
     ),
+    (
+        6,
+        "recoverable_run_leases",
+        (
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
+            "UPDATE runs SET lease_expires_at=started_at WHERE status='running' AND lease_expires_at IS NULL",
+        ),
+    ),
 )
 
 _FORBIDDEN_SECRET_KEYS = {
@@ -333,6 +350,14 @@ _FORBIDDEN_SECRET_KEYS = {
 
 def _utcnow() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def _lease_deadline(lease_seconds: int) -> str:
+    if lease_seconds < 60 or lease_seconds > 86400:
+        raise TenantStoreError("run lease must be between 60 and 86400 seconds")
+    return (
+        dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=lease_seconds)
+    ).isoformat()
 
 
 def _time_text(value: Any) -> str | None:
@@ -1025,8 +1050,11 @@ class TenantStore:
         tenant_id: str,
         worker_id: str,
         idempotency_key: str,
+        *,
+        lease_seconds: int = 1800,
     ) -> bool:
         now = _utcnow()
+        lease_expires_at = _lease_deadline(lease_seconds)
         try:
             with self._connect() as conn:
                 values = (
@@ -1036,20 +1064,23 @@ class TenantStore:
                     idempotency_key,
                     "running",
                     now,
+                    lease_expires_at,
                 )
                 if self.kind == "sqlite":
                     conn.execute(
                         """INSERT INTO runs
-                           (run_id,tenant_id,worker_id,idempotency_key,status,started_at)
-                           VALUES (?,?,?,?,?,?)""",
+                           (run_id,tenant_id,worker_id,idempotency_key,status,started_at,
+                            lease_expires_at)
+                           VALUES (?,?,?,?,?,?,?)""",
                         values,
                     )
                 else:
                     with conn.cursor() as cur:
                         cur.execute(
                             """INSERT INTO runs
-                               (run_id,tenant_id,worker_id,idempotency_key,status,started_at)
-                               VALUES (%s,%s,%s,%s,%s,%s)""",
+                               (run_id,tenant_id,worker_id,idempotency_key,status,started_at,
+                                lease_expires_at)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s)""",
                             values,
                         )
                 self._insert_audit(
@@ -1082,22 +1113,64 @@ class TenantStore:
                 raise
             raise TenantStoreError(f"could not claim run '{run_id}': {e}") from e
 
-    def begin_run_attempt(self, run_id: str) -> int:
+    def reclaim_stale_run(self, run_id: str, *, lease_seconds: int = 1800) -> bool:
+        now = _utcnow()
+        lease_expires_at = _lease_deadline(lease_seconds)
         with self._connect() as conn:
             if self.kind == "sqlite":
-                conn.execute(
-                    "UPDATE runs SET attempt_count=attempt_count+1,last_error=NULL WHERE run_id=?",
-                    (run_id,),
+                cur = conn.execute(
+                    """UPDATE runs SET lease_expires_at=? WHERE run_id=?
+                       AND status='running' AND lease_expires_at<=?""",
+                    (lease_expires_at, run_id, now),
                 )
-                row = conn.execute(
-                    "SELECT attempt_count FROM runs WHERE run_id=?", (run_id,)
+                rowcount = cur.rowcount
+                tenant_row = conn.execute(
+                    "SELECT tenant_id FROM runs WHERE run_id=?", (run_id,)
                 ).fetchone()
             else:
                 with conn.cursor() as cur:
                     cur.execute(
-                        """UPDATE runs SET attempt_count=attempt_count+1,last_error=NULL
-                           WHERE run_id=%s RETURNING attempt_count""",
-                        (run_id,),
+                        """UPDATE runs SET lease_expires_at=%s WHERE run_id=%s
+                           AND status='running' AND lease_expires_at<=%s
+                           RETURNING tenant_id""",
+                        (lease_expires_at, run_id, now),
+                    )
+                    tenant_row = cur.fetchone()
+                    rowcount = cur.rowcount
+            if rowcount == 1 and tenant_row:
+                self._insert_audit(
+                    conn,
+                    tenant_row[0],
+                    "run.reclaimed",
+                    "run",
+                    run_id,
+                )
+                return True
+        return False
+
+    def begin_run_attempt(self, run_id: str, *, lease_seconds: int = 1800) -> int:
+        lease_expires_at = _lease_deadline(lease_seconds)
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                cur = conn.execute(
+                    """UPDATE runs SET attempt_count=attempt_count+1,last_error=NULL,
+                       lease_expires_at=? WHERE run_id=? AND status='running'""",
+                    (lease_expires_at, run_id),
+                )
+                row = (
+                    conn.execute(
+                        "SELECT attempt_count FROM runs WHERE run_id=?", (run_id,)
+                    ).fetchone()
+                    if cur.rowcount == 1
+                    else None
+                )
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE runs SET attempt_count=attempt_count+1,last_error=NULL,
+                           lease_expires_at=%s WHERE run_id=%s AND status='running'
+                           RETURNING attempt_count""",
+                        (lease_expires_at, run_id),
                     )
                     row = cur.fetchone()
         if not row:
@@ -1127,7 +1200,7 @@ class TenantStore:
         placeholders = ("?", "?", "?") if self.kind == "sqlite" else ("%s", "%s", "%s")
         sql = (
             "SELECT run_id,tenant_id,worker_id,idempotency_key,status,result_json,"
-            "started_at,finished_at,attempt_count,last_error FROM runs WHERE "
+            "started_at,finished_at,attempt_count,last_error,lease_expires_at FROM runs WHERE "
             f"tenant_id={placeholders[0]} AND worker_id={placeholders[1]} "
             f"AND idempotency_key={placeholders[2]}"
         )
@@ -1154,6 +1227,7 @@ class TenantStore:
             _time_text(row[7]),
             int(row[8]),
             row[9],
+            _time_text(row[10]),
         )
 
     def get_schedule_state(
@@ -1472,7 +1546,8 @@ class TenantStore:
         with self._connect() as conn:
             if self.kind == "sqlite":
                 cur = conn.execute(
-                    "UPDATE runs SET status=?,result_json=?,finished_at=? WHERE run_id=?",
+                    """UPDATE runs SET status=?,result_json=?,finished_at=?,
+                       lease_expires_at=NULL WHERE run_id=?""",
                     (status, payload, now, run_id),
                 )
                 rowcount = cur.rowcount
@@ -1483,7 +1558,8 @@ class TenantStore:
                 with conn.cursor() as cur:
                     cur.execute(
                         """UPDATE runs
-                           SET status=%s,result_json=%s::jsonb,finished_at=%s
+                           SET status=%s,result_json=%s::jsonb,finished_at=%s,
+                               lease_expires_at=NULL
                            WHERE run_id=%s RETURNING tenant_id""",
                         (status, payload, now, run_id),
                     )

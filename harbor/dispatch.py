@@ -78,6 +78,7 @@ def dispatch_worker(
     max_attempts: int = 1,
     retry_delay_seconds: float = 0,
     sleeper: Callable[[float], None] = time.sleep,
+    run_lease_seconds: int = 1800,
     delivery_handler: Callable[
         [TenantRecord, str, dict[str, Any]], list[dict[str, Any]]
     ]
@@ -91,22 +92,51 @@ def dispatch_worker(
         raise ValueError("max_attempts must be between 1 and 5")
 
     run_id = "run_" + secrets.token_hex(12)
-    if not store.claim_run(run_id, record.tenant_id, worker_id, idempotency_key):
-        raise DuplicateRun(
-            store.get_run_by_idempotency(record.tenant_id, worker_id, idempotency_key)
+    previous_attempts = 0
+    if not store.claim_run(
+        run_id,
+        record.tenant_id,
+        worker_id,
+        idempotency_key,
+        lease_seconds=run_lease_seconds,
+    ):
+        existing = store.get_run_by_idempotency(
+            record.tenant_id, worker_id, idempotency_key
         )
+        if (
+            existing is None
+            or existing.status != "running"
+            or not store.reclaim_stale_run(
+                existing.run_id, lease_seconds=run_lease_seconds
+            )
+        ):
+            raise DuplicateRun(existing)
+        run_id = existing.run_id
+        previous_attempts = existing.attempt_count
+
+    if previous_attempts >= max_attempts:
+        failure = {
+            "status": "failed",
+            "error": {
+                "kind": "worker_dispatch_failed",
+                "detail": "run lease expired after the maximum attempts",
+            },
+            "attempts": previous_attempts,
+        }
+        store.finish_run(run_id, "failed", failure)
+        raise RunExecutionFailed(run_id, failure)
 
     run_spec = build_run_spec(record, worker_id, inputs, run_id, idempotency_key)
     last_result: dict[str, Any] | None = None
-    for attempt in range(1, max_attempts + 1):
-        store.begin_run_attempt(run_id)
+    for attempt in range(previous_attempts + 1, max_attempts + 1):
+        store.begin_run_attempt(run_id, lease_seconds=run_lease_seconds)
         try:
             result = runner.run(record.sprite_name, run_spec)
             validate_non_secret_metadata(result, "run.result")
             if result.get("status") == "completed" and delivery_handler is not None:
                 result["deliveries"] = delivery_handler(record, run_id, result)
                 validate_non_secret_metadata(result["deliveries"], "run.deliveries")
-        except Exception as error:  # noqa: BLE001 - durable execution boundary
+        except Exception as error:
             # This is the execution boundary: third-party/runtime failures must
             # become durable failed attempts instead of terminating a caller.
             error_detail = _safe_error(error)

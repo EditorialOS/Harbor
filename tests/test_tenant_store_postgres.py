@@ -38,6 +38,21 @@ def test_postgres_migrations_scoping_and_audit(postgres_store: TenantStore):
     assert postgres_store.claim_run(
         f"run-b-{suffix}", tenant_b, "newsletter-intelligence", "same-window"
     )
+    recoverable_run = f"run-recoverable-{suffix}"
+    assert postgres_store.claim_run(
+        recoverable_run,
+        tenant_a,
+        "newsletter-intelligence",
+        f"recoverable-{suffix}",
+        lease_seconds=60,
+    )
+    with postgres_store._connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE runs SET lease_expires_at='2020-01-01T00:00:00+00:00' WHERE run_id=%s",
+            (recoverable_run,),
+        )
+    assert postgres_store.reclaim_stale_run(recoverable_run, lease_seconds=60)
+    assert not postgres_store.reclaim_stale_run(recoverable_run, lease_seconds=60)
     scheduled_run = f"run-scheduled-{suffix}"
     scheduled_window = f"schedule-v1:2026-09-06:0600:UTC:{suffix}"
     assert postgres_store.claim_run(

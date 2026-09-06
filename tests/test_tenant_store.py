@@ -48,6 +48,33 @@ def test_run_idempotency(tmp_path: Path):
     assert store.claim_run("run4", "acme", "another-worker", "same-window")
 
 
+def test_run_lease_can_only_be_reclaimed_after_expiry(tmp_path: Path):
+    store = TenantStore(f"sqlite:///{tmp_path / 'harbor.db'}")
+    _create(store)
+    assert store.claim_run(
+        "run1",
+        "acme",
+        "newsletter-intelligence",
+        "same-window",
+        lease_seconds=60,
+    )
+    record = store.get_run_by_idempotency(
+        "acme", "newsletter-intelligence", "same-window"
+    )
+    assert record is not None
+    assert record.lease_expires_at is not None
+    assert not store.reclaim_stale_run("run1", lease_seconds=60)
+
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE runs SET lease_expires_at=? WHERE run_id=?",
+            ("2020-01-01T00:00:00+00:00", "run1"),
+        )
+    assert store.reclaim_stale_run("run1", lease_seconds=60)
+    assert not store.reclaim_stale_run("run1", lease_seconds=60)
+    assert "run.reclaimed" in {event.action for event in store.list_audit("acme")}
+
+
 def test_claim_run_does_not_hide_database_errors(tmp_path: Path):
     store = TenantStore(f"sqlite:///{tmp_path / 'harbor.db'}")
     with pytest.raises(TenantStoreError, match="could not claim run"):
@@ -183,6 +210,9 @@ def test_existing_alpha_sqlite_database_is_migrated(tmp_path: Path):
 
     store = TenantStore(f"sqlite:///{path}")
     assert store.schema_version == LATEST_SCHEMA_VERSION
+    with store._connect() as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
+    assert "lease_expires_at" in columns
     assert store.claim_run("beta-run", "beta", "newsletter-intelligence", "window")
     assert not store.claim_run("acme-run", "acme", "newsletter-intelligence", "window")
 
