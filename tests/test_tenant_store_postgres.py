@@ -109,3 +109,25 @@ def test_postgres_migrations_scoping_and_audit(postgres_store: TenantStore):
     assert "run.claimed" in {
         event.action for event in postgres_store.list_audit(tenant_a)
     }
+
+    invited_tenant = f"pg-invite-{suffix}"
+    _, invite_code = postgres_store.create_onboarding_invitation(
+        f"owner-{suffix}@example.com"
+    )
+    _, invited_key = postgres_store.redeem_onboarding_invitation(
+        invite_code,
+        f"owner-{suffix}@example.com",
+        invited_tenant,
+        "Postgres Invited Workspace",
+        "UTC",
+        {"workers": ["newsletter-intelligence"], "connections": []},
+    )
+    session, session_token, csrf_token = postgres_store.create_web_session(
+        invited_tenant
+    )
+    assert postgres_store.verify_api_key(invited_tenant, invited_key)
+    assert postgres_store.resolve_web_session(session_token) == session
+    assert postgres_store.verify_web_csrf(session, csrf_token)
+    assert postgres_store.workspace_owner_email(invited_tenant) == (
+        f"owner-{suffix}@example.com"
+    )

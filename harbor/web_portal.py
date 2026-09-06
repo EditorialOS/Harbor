@@ -1,0 +1,594 @@
+"""Minimal authenticated customer web surface for Harbor.
+
+The portal is deliberately a thin adapter over the same tenant store, Sprite
+runner, scheduler, dispatch, and output code used by the API and MCP surface.
+It never accepts provider credentials or tenant filesystem paths.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import html
+import re
+import secrets
+from collections.abc import Callable
+from typing import Any
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from fastapi import APIRouter, Form, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+
+from .dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
+from .outputs import DeliveryCoordinator, DeliveryError, validate_email_recipient
+from .scheduler import DailySchedule, next_occurrence
+from .tenant_store import TenantStore, TenantStoreError, WebSession
+
+SESSION_COOKIE = "harbor_session"
+CSRF_COOKIE = "harbor_csrf"
+COOKIE_MAX_AGE = 30 * 24 * 60 * 60
+
+
+def _escape(value: Any) -> str:
+    return html.escape(str(value), quote=True)
+
+
+def _page(title: str, content: str, *, status_code: int = 200) -> HTMLResponse:
+    response = HTMLResponse(
+        """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>"""
+        + _escape(title)
+        + """ · Harbor</title><style>
+:root{color-scheme:light;--ink:#10233f;--muted:#607089;--line:#dce4ee;--brand:#175cd3;--ok:#087443;--warn:#9a6700;--bad:#b42318;--bg:#f5f8fc}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,sans-serif}
+main{max-width:880px;margin:0 auto;padding:40px 20px 80px}nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:36px}.brand{font-size:22px;font-weight:800;letter-spacing:-.02em}
+h1{font-size:34px;line-height:1.15;margin:0 0 12px}h2{font-size:21px;margin:0 0 14px}.lede,.muted{color:var(--muted)}.lede{font-size:18px;margin:0 0 28px}
+.card{background:white;border:1px solid var(--line);border-radius:14px;padding:22px;margin:18px 0;box-shadow:0 5px 18px rgba(16,35,63,.05)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:18px}.grid .card{margin:0}
+label{display:block;font-weight:650;margin:14px 0 5px}input,select{width:100%;font:inherit;padding:10px 12px;border:1px solid #b9c6d6;border-radius:8px;background:#fff}input[type=checkbox]{width:auto;margin-right:8px}
+button,.button{display:inline-block;border:0;border-radius:8px;padding:10px 15px;background:var(--brand);color:#fff;font:inherit;font-weight:700;text-decoration:none;cursor:pointer;margin-top:16px}.secondary{background:#e8eef8;color:var(--ink)}
+.status{font-weight:750}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.notice{border-left:4px solid var(--brand);padding:12px 14px;background:#eef4ff;border-radius:6px;margin:18px 0}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px 6px;border-bottom:1px solid var(--line);font-size:14px}code{overflow-wrap:anywhere}.steps li{margin:8px 0}.secret{background:#f2f4f7;border:1px solid var(--line);padding:12px;border-radius:8px;font-family:ui-monospace,monospace;overflow-wrap:anywhere}
+form.inline{display:inline}form.inline button{margin:0}.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.small{font-size:13px}
+</style></head><body><main><nav><div class="brand">Harbor</div></nav>"""
+        + content
+        + "</main></body></html>",
+        status_code=status_code,
+    )
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
+        "base-uri 'none'; frame-ancestors 'none'"
+    )
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _redirect(path: str) -> RedirectResponse:
+    return RedirectResponse(path, status_code=303)
+
+
+def _set_session_cookies(
+    response: HTMLResponse | RedirectResponse, token: str, csrf_token: str
+) -> None:
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+    response.set_cookie(
+        CSRF_COOKIE,
+        csrf_token,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_session_cookies(response: HTMLResponse | RedirectResponse) -> None:
+    response.delete_cookie(SESSION_COOKIE, path="/", secure=True, httponly=True)
+    response.delete_cookie(CSRF_COOKIE, path="/", secure=True, httponly=True)
+
+
+def _session(request: Request, store: TenantStore) -> WebSession | None:
+    return store.resolve_web_session(request.cookies.get(SESSION_COOKIE, ""))
+
+
+def _require_csrf(
+    request: Request, store: TenantStore, session: WebSession, csrf_token: str
+) -> bool:
+    cookie_token = request.cookies.get(CSRF_COOKIE, "")
+    return (
+        bool(cookie_token)
+        and secrets.compare_digest(cookie_token, csrf_token)
+        and store.verify_web_csrf(session, csrf_token)
+    )
+
+
+def _slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")[:40] or "workspace"
+
+
+def _tenant_id(workspace_name: str) -> str:
+    return f"{_slug(workspace_name)}-{secrets.token_hex(4)}"[:64]
+
+
+def _valid_gateway(connection_id: str, gateway_base_url: str) -> bool:
+    parsed = urlsplit(gateway_base_url)
+    expected = re.compile(
+        rf"^/v1/gateway/[a-z0-9_-]+/{re.escape(connection_id)}/?$"
+    )
+    return bool(
+        parsed.scheme == "https"
+        and parsed.hostname == "api.sprites.dev"
+        and not parsed.username
+        and not parsed.password
+        and not parsed.query
+        and not parsed.fragment
+        and expected.fullmatch(parsed.path)
+    )
+
+
+def _provision(store: TenantStore, runner: Any, tenant_id: str) -> bool:
+    record = store.get(tenant_id)
+    sprite_name = record.sprite_name or (
+        f"harbor-{_slug(tenant_id)}-{hashlib.sha256(tenant_id.encode()).hexdigest()[:8]}"
+    )[:63]
+    store.record_provisioning_status(
+        tenant_id, "provisioning", actor_type="web_onboarding"
+    )
+    try:
+        runner.provision(sprite_name)
+        store.set_sprite(tenant_id, sprite_name, actor_type="web_onboarding")
+        store.record_provisioning_status(
+            tenant_id, "ready", actor_type="web_onboarding"
+        )
+        return True
+    except Exception as error:  # noqa: BLE001 - infrastructure adapter boundary
+        store.record_provisioning_status(
+            tenant_id,
+            "failed",
+            error_type=type(error).__name__,
+            actor_type="web_onboarding",
+        )
+        return False
+
+
+def _notice(value: str | None) -> str:
+    messages = {
+        "schedule_saved": "Your delivery schedule was saved.",
+        "email_saved": "Your email delivery setting was saved.",
+        "connection_ready": "Your beehiiv connection was verified.",
+        "connection_failed": "Harbor could not verify that connection. Check its Sprite access policy and publication ID.",
+        "run_completed": "Newsletter Intelligence completed successfully.",
+        "run_failed": "The run failed and Harbor recorded the failure. You can safely try again.",
+        "sprite_ready": "Your private Harbor computer is ready.",
+        "sprite_failed": "Provisioning failed and was recorded. You can safely retry.",
+        "csrf_failed": "That form expired. Refresh this page and try again.",
+    }
+    message = messages.get(value or "")
+    return f'<div class="notice">{_escape(message)}</div>' if message else ""
+
+
+def create_web_router(
+    store_getter: Callable[[], TenantStore],
+    runner_factory: Callable[[], Any],
+) -> APIRouter:
+    router = APIRouter(include_in_schema=False)
+
+    @router.get("/", response_class=HTMLResponse)
+    def landing(request: Request):
+        store = store_getter()
+        if _session(request, store):
+            return _redirect("/app")
+        return _page(
+            "Newsletter intelligence",
+            """<h1>Your newsletter’s useful signals, every morning.</h1>
+<p class="lede">Harbor securely reads your newsletter performance, runs inside your private worker computer, and delivers a concise brief.</p>
+<div class="actions"><a class="button" href="/login">Sign in</a><a class="button secondary" href="/onboarding">Create invited workspace</a></div>""",
+        )
+
+    @router.get("/login", response_class=HTMLResponse)
+    def login_page(request: Request):
+        if _session(request, store_getter()):
+            return _redirect("/app")
+        return _page(
+            "Sign in",
+            """<h1>Sign in to Harbor</h1><p class="lede">Use the workspace ID and Harbor access key you received when the workspace was created.</p>
+<form class="card" method="post" action="/login">
+<label for="tenant_id">Workspace ID</label><input id="tenant_id" name="tenant_id" required maxlength="64" autocomplete="username">
+<label for="access_key">Harbor access key</label><input id="access_key" name="access_key" type="password" required autocomplete="current-password">
+<button type="submit">Sign in</button></form>""",
+        )
+
+    @router.post("/login", response_class=HTMLResponse)
+    def login(
+        tenant_id: str = Form(..., min_length=2, max_length=64),
+        access_key: str = Form(..., min_length=20, max_length=200),
+    ):
+        store = store_getter()
+        if not store.verify_api_key(tenant_id, access_key):
+            return _page(
+                "Sign in",
+                '<h1>Sign in failed</h1><p class="lede">That workspace ID or access key was not recognized.</p><a class="button" href="/login">Try again</a>',
+                status_code=401,
+            )
+        _, token, csrf_token = store.create_web_session(tenant_id)
+        response = _redirect("/app")
+        _set_session_cookies(response, token, csrf_token)
+        return response
+
+    @router.get("/onboarding", response_class=HTMLResponse)
+    def onboarding_page(request: Request):
+        if _session(request, store_getter()):
+            return _redirect("/app")
+        return _page(
+            "Create workspace",
+            """<h1>Create your Harbor workspace</h1><p class="lede">You need a one-time invitation code from Harbor. Provider credentials are never entered here.</p>
+<form class="card" method="post" action="/onboarding">
+<label for="invitation_code">Invitation code</label><input id="invitation_code" name="invitation_code" type="password" required maxlength="200" autocomplete="one-time-code">
+<label for="email">Invited email</label><input id="email" name="email" type="email" required maxlength="254" autocomplete="email">
+<label for="workspace_name">Workspace name</label><input id="workspace_name" name="workspace_name" required maxlength="100">
+<label for="timezone">Time zone</label><input id="timezone" name="timezone" value="America/Los_Angeles" required maxlength="128">
+<label for="hour">Morning report hour (0–23)</label><input id="hour" name="hour" type="number" min="0" max="23" value="6" required>
+<label><input name="email_delivery" type="checkbox" value="yes" checked>Deliver reports to the invited email</label>
+<button type="submit">Create workspace</button></form>""",
+        )
+
+    @router.post("/onboarding", response_class=HTMLResponse)
+    def onboard(
+        invitation_code: str = Form(..., min_length=20, max_length=200),
+        email: str = Form(..., min_length=3, max_length=254),
+        workspace_name: str = Form(..., min_length=1, max_length=100),
+        timezone: str = Form(..., min_length=1, max_length=128),
+        hour: int = Form(..., ge=0, le=23),
+        email_delivery: str | None = Form(default=None),
+    ):
+        store = store_getter()
+        try:
+            ZoneInfo(timezone)
+            normalized_email = validate_email_recipient(email)
+            schedule = {"newsletter-intelligence": {"hour": hour, "minute": 0}}
+            outputs = ["files"]
+            config: dict[str, Any] = {
+                "workers": ["newsletter-intelligence"],
+                "schedule": schedule,
+                "outputs": outputs,
+                "connections": [],
+                "provisioning": {"status": "pending"},
+            }
+            if email_delivery == "yes":
+                outputs.append("email")
+                config["output_settings"] = {
+                    "email": {
+                        "recipients": [normalized_email],
+                        "subject_prefix": "Harbor Morning Intelligence",
+                    }
+                }
+            record, api_key = store.redeem_onboarding_invitation(
+                invitation_code,
+                normalized_email,
+                _tenant_id(workspace_name),
+                workspace_name,
+                timezone,
+                config,
+            )
+            next_at = next_occurrence(
+                dt.datetime.now(dt.timezone.utc), timezone, DailySchedule(hour, 0)
+            )
+            store.update_worker_schedule(
+                record.tenant_id,
+                "newsletter-intelligence",
+                {"hour": hour, "minute": 0},
+                timezone,
+                next_at.isoformat(),
+                actor_type="web_onboarding",
+            )
+        except (TenantStoreError, DeliveryError, ValueError, ZoneInfoNotFoundError) as error:
+            return _page(
+                "Create workspace",
+                f'<h1>Workspace not created</h1><p class="lede">{_escape(error)}</p><a class="button" href="/onboarding">Try again</a>',
+                status_code=400,
+            )
+
+        provisioned = _provision(store, runner_factory(), record.tenant_id)
+        _, token, csrf_token = store.create_web_session(record.tenant_id)
+        state = (
+            '<span class="status ok">Your private Harbor computer is ready.</span>'
+            if provisioned
+            else '<span class="status bad">Provisioning failed and was recorded. You can retry from the workspace.</span>'
+        )
+        response = _page(
+            "Workspace created",
+            f"""<h1>Your Harbor workspace is created</h1><p class="lede">{state}</p>
+<div class="card"><h2>Save this access information now</h2><p>Harbor stores only a hash of this key, so it cannot show it again.</p>
+<p><strong>Workspace ID</strong></p><div class="secret">{_escape(record.tenant_id)}</div>
+<p><strong>Harbor access key</strong></p><div class="secret">{_escape(api_key)}</div></div>
+<a class="button" href="/app">Continue to workspace</a>""",
+        )
+        _set_session_cookies(response, token, csrf_token)
+        return response
+
+    @router.get("/app", response_class=HTMLResponse)
+    def dashboard(request: Request, notice: str | None = None):
+        store = store_getter()
+        session = _session(request, store)
+        csrf_token = request.cookies.get(CSRF_COOKIE, "")
+        if not session or not store.verify_web_csrf(session, csrf_token):
+            response = _redirect("/login")
+            _clear_session_cookies(response)
+            return response
+        record = store.get(session.tenant_id)
+        schedule = (record.config.get("schedule") or {}).get(
+            "newsletter-intelligence", {"hour": 6, "minute": 0}
+        )
+        schedule_state = store.get_schedule_state(
+            record.tenant_id, "newsletter-intelligence"
+        )
+        provisioning = record.config.get("provisioning") or {}
+        if record.sprite_name:
+            sprite_status = '<span class="status ok">Ready</span>'
+        elif provisioning.get("status") == "failed":
+            sprite_status = '<span class="status bad">Needs retry</span>'
+        else:
+            sprite_status = '<span class="status warn">Provisioning</span>'
+        connections = record.config.get("connections", [])
+        connection = next(
+            (item for item in connections if item.get("provider") == "beehiiv"), None
+        )
+        connection_status = (
+            '<span class="status ok">Connected</span>'
+            if connection and connection.get("status") == "verified"
+            else '<span class="status warn">Not connected</span>'
+        )
+        email_config = (record.config.get("output_settings") or {}).get("email") or {}
+        email_enabled = "email" in record.config.get("outputs", [])
+        owner_email = store.workspace_owner_email(record.tenant_id) or ""
+        runs = store.list_runs(record.tenant_id, limit=10)
+        run_rows = "".join(
+            f"<tr><td>{_escape(run.started_at[:19].replace('T', ' '))}</td><td>{_escape(run.status)}</td><td>{_escape(run.attempt_count)}</td></tr>"
+            for run in runs
+        ) or '<tr><td colspan="3" class="muted">No runs yet.</td></tr>'
+        next_run = (
+            _escape(schedule_state.next_run_at)
+            if schedule_state
+            else "Waiting for scheduler"
+        )
+        provisioning_action = ""
+        if not record.sprite_name:
+            provisioning_action = f"""<form method="post" action="/app/provision"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><button type="submit">Retry provisioning</button></form>"""
+        run_operation = "web_" + secrets.token_urlsafe(24)
+        content = f"""<h1>{_escape(record.name)}</h1><p class="lede">Newsletter Intelligence workspace</p>{_notice(notice)}
+<div class="grid"><div class="card"><h2>Private worker computer</h2><p>{sprite_status}</p>{provisioning_action}</div>
+<div class="card"><h2>beehiiv source</h2><p>{connection_status}</p></div>
+<div class="card"><h2>Next report</h2><p class="status">{next_run}</p></div></div>
+
+<section class="card"><h2>Connect beehiiv</h2>
+<p>Harbor never asks for or stores your beehiiv API key. Create the credential in Fly Sprites Connectors, restrict it to this workspace’s Sprite, then enter only the non-secret connection details below.</p>
+<ol class="steps"><li>Open <a href="https://fly.io/dashboard" rel="noreferrer">Fly dashboard</a> and choose <strong>Sprites → Connectors → Add connector → Custom API</strong>.</li>
+<li>Use beehiiv base URL <code>https://api.beehiiv.com/v2</code>, Bearer header authentication, and test URL <code>https://api.beehiiv.com/v2/publications</code>.</li>
+<li>Grant access only to the Sprite named <code>{_escape(record.sprite_name or 'provisioning-not-complete')}</code>. Then copy the connection ID, gateway URL, and publication ID.</li></ol>
+<form method="post" action="/app/connection"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+<label>Connection ID</label><input name="connection_id" required maxlength="255" pattern="[A-Za-z0-9_-]+" value="{_escape(connection.get('id', '') if connection else '')}">
+<label>Gateway URL</label><input name="gateway_base_url" type="url" required maxlength="500" value="{_escape((connection.get('settings') or {}).get('gateway_base_url', '') if connection else '')}">
+<label>beehiiv publication ID</label><input name="publication_id" required maxlength="255" value="{_escape((connection.get('settings') or {}).get('publication_id', '') if connection else '')}">
+<button type="submit">Verify connection</button></form></section>
+
+<div class="grid"><section class="card"><h2>Schedule</h2><form method="post" action="/app/schedule"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+<label>Morning hour (0–23)</label><input name="hour" type="number" min="0" max="23" value="{_escape(schedule.get('hour', 6))}" required>
+<label>Minute</label><input name="minute" type="number" min="0" max="59" value="{_escape(schedule.get('minute', 0))}" required>
+<label>Time zone</label><input name="timezone" value="{_escape(record.timezone)}" required maxlength="128"><button type="submit">Save schedule</button></form></section>
+
+<section class="card"><h2>Email output</h2><form method="post" action="/app/email"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+<label><input name="enabled" type="checkbox" value="yes" {'checked' if email_enabled else ''}>Send report by email</label>
+<label>Recipient</label><input name="recipient" type="email" value="{_escape((email_config.get('recipients') or [owner_email])[0] if (email_config.get('recipients') or [owner_email]) else '')}" maxlength="254">
+<button type="submit">Save email output</button></form></section></div>
+
+<section class="card"><h2>Run now</h2><p>Uses the same worker and delivery path as the scheduler.</p><form method="post" action="/app/run"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><input type="hidden" name="idempotency_key" value="{_escape(run_operation)}"><button type="submit" {'disabled' if not record.sprite_name else ''}>Run Newsletter Intelligence</button></form></section>
+
+<section class="card"><h2>Recent runs</h2><table><thead><tr><th>Started (UTC)</th><th>Status</th><th>Attempts</th></tr></thead><tbody>{run_rows}</tbody></table></section>
+<form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><button class="secondary" type="submit">Sign out</button></form>"""
+        return _page(record.name, content)
+
+    def authenticated_form(
+        request: Request, csrf_token: str
+    ) -> tuple[TenantStore, WebSession] | None:
+        store = store_getter()
+        session = _session(request, store)
+        if not session or not _require_csrf(request, store, session, csrf_token):
+            return None
+        return store, session
+
+    @router.post("/app/provision")
+    def provision(request: Request, csrf_token: str = Form(...)):
+        context = authenticated_form(request, csrf_token)
+        if not context:
+            return _redirect("/app?notice=csrf_failed")
+        store, session = context
+        success = _provision(store, runner_factory(), session.tenant_id)
+        return _redirect("/app?notice=" + ("sprite_ready" if success else "sprite_failed"))
+
+    @router.post("/app/schedule")
+    def update_schedule(
+        request: Request,
+        csrf_token: str = Form(...),
+        hour: int = Form(..., ge=0, le=23),
+        minute: int = Form(..., ge=0, le=59),
+        timezone: str = Form(..., min_length=1, max_length=128),
+    ):
+        context = authenticated_form(request, csrf_token)
+        if not context:
+            return _redirect("/app?notice=csrf_failed")
+        store, session = context
+        try:
+            ZoneInfo(timezone)
+            next_at = next_occurrence(
+                dt.datetime.now(dt.timezone.utc),
+                timezone,
+                DailySchedule(hour, minute),
+            )
+            store.update_worker_schedule(
+                session.tenant_id,
+                "newsletter-intelligence",
+                {"hour": hour, "minute": minute},
+                timezone,
+                next_at.isoformat(),
+                actor_type="web_portal",
+            )
+        except (TenantStoreError, ValueError, ZoneInfoNotFoundError):
+            return _redirect("/app?notice=csrf_failed")
+        return _redirect("/app?notice=schedule_saved")
+
+    @router.post("/app/email")
+    def update_email(
+        request: Request,
+        csrf_token: str = Form(...),
+        recipient: str = Form(default="", max_length=254),
+        enabled: str | None = Form(default=None),
+    ):
+        context = authenticated_form(request, csrf_token)
+        if not context:
+            return _redirect("/app?notice=csrf_failed")
+        store, session = context
+        try:
+            recipients = [validate_email_recipient(recipient)] if enabled == "yes" else []
+            store.configure_email_output(
+                session.tenant_id,
+                enabled=enabled == "yes",
+                recipients=recipients,
+                subject_prefix="Harbor Morning Intelligence",
+                actor_type="web_portal",
+            )
+        except (TenantStoreError, DeliveryError):
+            return _redirect("/app?notice=csrf_failed")
+        return _redirect("/app?notice=email_saved")
+
+    @router.post("/app/connection")
+    def attach_connection(
+        request: Request,
+        csrf_token: str = Form(...),
+        connection_id: str = Form(..., min_length=1, max_length=255),
+        gateway_base_url: str = Form(..., min_length=1, max_length=500),
+        publication_id: str = Form(..., min_length=1, max_length=255),
+    ):
+        context = authenticated_form(request, csrf_token)
+        if not context:
+            return _redirect("/app?notice=csrf_failed")
+        store, session = context
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", connection_id) or not _valid_gateway(
+            connection_id, gateway_base_url
+        ):
+            return _redirect("/app?notice=connection_failed")
+        connection = {
+            "id": connection_id,
+            "provider": "beehiiv",
+            "status": "pending",
+            "settings": {
+                "publication_id": publication_id,
+                "recent_posts": 5,
+                "gateway_base_url": gateway_base_url,
+                "auth_mode": "sprite_connector",
+            },
+        }
+        try:
+            record = store.upsert_connection(
+                session.tenant_id, connection, actor_type="web_portal"
+            )
+            if not record.sprite_name:
+                raise TenantStoreError("tenant Sprite is not provisioned")
+            result = runner_factory().verify_connection(
+                record.sprite_name,
+                {
+                    "tenant_id": record.tenant_id,
+                    "name": record.name,
+                    "timezone": record.timezone,
+                    "workspace": "/workspace",
+                    "workers": record.config.get("workers", []),
+                    "outputs": record.config.get("outputs", ["files"]),
+                    "connections": record.config.get("connections", []),
+                    "provider": "beehiiv",
+                },
+            )
+            store.record_connection_verification(
+                session.tenant_id, connection_id, result, actor_type="web_portal"
+            )
+            if result.get("status") != "verified":
+                return _redirect("/app?notice=connection_failed")
+        except Exception as error:  # noqa: BLE001 - connector adapter boundary
+            result = {
+                "status": "failed",
+                "error": {"kind": type(error).__name__, "detail": "connection verification failed"},
+            }
+            try:
+                store.record_connection_verification(
+                    session.tenant_id,
+                    connection_id,
+                    result,
+                    actor_type="web_portal",
+                )
+            except TenantStoreError:
+                pass
+            return _redirect("/app?notice=connection_failed")
+        return _redirect("/app?notice=connection_ready")
+
+    @router.post("/app/run")
+    def run_worker(
+        request: Request,
+        csrf_token: str = Form(...),
+        idempotency_key: str = Form(..., min_length=20, max_length=255),
+    ):
+        context = authenticated_form(request, csrf_token)
+        if not context:
+            return _redirect("/app?notice=csrf_failed")
+        store, session = context
+        record = store.get(session.tenant_id)
+        if not record.sprite_name:
+            return _redirect("/app?notice=run_failed")
+        runner = runner_factory()
+        try:
+            dispatch_worker(
+                store,
+                runner,
+                record,
+                "newsletter-intelligence",
+                {},
+                idempotency_key,
+                delivery_handler=DeliveryCoordinator(store, runner).deliver,
+            )
+        except DuplicateRun:
+            existing = next(
+                (
+                    run
+                    for run in store.list_runs(session.tenant_id)
+                    if run.idempotency_key == idempotency_key
+                ),
+                None,
+            )
+            return _redirect(
+                "/app?notice="
+                + ("run_completed" if existing and existing.status == "completed" else "run_failed")
+            )
+        except (RunExecutionFailed, TenantStoreError):
+            return _redirect("/app?notice=run_failed")
+        return _redirect("/app?notice=run_completed")
+
+    @router.post("/logout")
+    def logout(request: Request, csrf_token: str = Form(...)):
+        store = store_getter()
+        session = _session(request, store)
+        token = request.cookies.get(SESSION_COOKIE, "")
+        if session and _require_csrf(request, store, session, csrf_token):
+            store.delete_web_session(token)
+        response = _redirect("/")
+        _clear_session_cookies(response)
+        return response
+
+    return router

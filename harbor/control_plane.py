@@ -36,6 +36,7 @@ from .tenant_store import (
     TenantStoreError,
     validate_non_secret_metadata,
 )
+from .web_portal import create_web_router
 
 store = TenantStore()
 remote_mcp = create_remote_mcp(store)
@@ -119,6 +120,13 @@ class EmailOutputUpdate(BaseModel):
     subject_prefix: str = Field(default="Harbor Morning Intelligence", max_length=100)
 
 
+class OnboardingInvitationCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=3, max_length=254)
+    expires_in_hours: int = Field(default=24, ge=1, le=168)
+
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "service": "harbor-control-plane"}
@@ -147,7 +155,7 @@ def _prometheus_label(value: str) -> str:
 def metrics():
     try:
         snapshot = store.operational_snapshot()
-    except Exception:
+    except Exception:  # noqa: BLE001 - health boundary must survive driver failures
         return PlainTextResponse(
             "# TYPE harbor_metrics_up gauge\nharbor_metrics_up 0\n",
             status_code=503,
@@ -222,16 +230,46 @@ def create_tenant(req: TenantCreate):
     }
 
 
+@app.post("/v1/onboarding/invitations", dependencies=[Depends(_admin)])
+def create_onboarding_invitation(req: OnboardingInvitationCreate):
+    """Issue a one-time code; only its hash is persisted."""
+    try:
+        email = validate_email_recipient(req.email)
+        invitation, code = store.create_onboarding_invitation(
+            email, expires_in_hours=req.expires_in_hours
+        )
+    except (DeliveryError, TenantStoreError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {
+        "invitation_id": invitation.invitation_id,
+        "invitation_code": code,
+        "email": invitation.email,
+        "expires_at": invitation.expires_at,
+        "onboarding_path": "/onboarding",
+    }
+
+
 @app.post("/v1/tenants/{tenant_id}/provision-sprite", dependencies=[Depends(_admin)])
 def provision_sprite(tenant_id: str):
     try:
         record = store.get(tenant_id)
         sprite_name = record.sprite_name or _sprite_name(tenant_id)
+        store.record_provisioning_status(
+            tenant_id, "provisioning", actor_type="admin_api"
+        )
         info = SpriteRunner().provision(sprite_name)
         store.set_sprite(tenant_id, sprite_name, actor_type="admin_api")
+        store.record_provisioning_status(tenant_id, "ready", actor_type="admin_api")
         return info
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        with contextlib.suppress(TenantStoreError):
+            store.record_provisioning_status(
+                tenant_id,
+                "failed",
+                error_type=type(e).__name__,
+                actor_type="admin_api",
+            )
+        raise HTTPException(status_code=500, detail="Sprite provisioning failed") from e
 
 
 @app.post("/v1/tenants/{tenant_id}/connections", dependencies=[Depends(_admin)])
@@ -326,6 +364,8 @@ def tenant_status(tenant_id: str, authorization: str | None = Header(default=Non
         "name": record.name,
         "timezone": record.timezone,
         "sprite_name": record.sprite_name,
+        "provisioning": record.config.get("provisioning")
+        or {"status": "ready" if record.sprite_name else "pending"},
         "workers": record.config.get("workers", []),
         "schedule": record.config.get("schedule", {}),
         "schedule_state": {
@@ -477,3 +517,6 @@ def run_worker_remote(
     except TenantStoreError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     return {"run_id": run_id, "result": result}
+
+
+app.include_router(create_web_router(lambda: store, lambda: SpriteRunner()))

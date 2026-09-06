@@ -269,6 +269,53 @@ def test_tenant_can_configure_email_without_provider_credentials(tmp_path, monke
         )
 
 
+def test_admin_can_issue_hashed_one_time_onboarding_invitation(
+    tmp_path, monkeypatch
+):
+    store = TenantStore(f"sqlite:///{tmp_path / 'invitations.db'}")
+    monkeypatch.setattr(control_plane, "store", store)
+
+    result = control_plane.create_onboarding_invitation(
+        control_plane.OnboardingInvitationCreate(email="Owner@Example.com")
+    )
+
+    assert result["email"] == "owner@example.com"
+    assert result["onboarding_path"] == "/onboarding"
+    with store._connect() as conn:
+        persisted = conn.execute(
+            "SELECT code_hash FROM onboarding_invitations WHERE invitation_id=?",
+            (result["invitation_id"],),
+        ).fetchone()[0]
+    assert persisted != result["invitation_code"]
+    assert result["invitation_code"] not in persisted
+
+
+def test_admin_sprite_provisioning_failure_is_persisted(tmp_path, monkeypatch):
+    store = TenantStore(f"sqlite:///{tmp_path / 'provisioning-failure.db'}")
+    store.create_tenant(
+        "acme",
+        "Acme",
+        "UTC",
+        {"workers": ["newsletter-intelligence"], "connections": []},
+    )
+    monkeypatch.setattr(control_plane, "store", store)
+
+    class BrokenRunner:
+        def provision(self, sprite_name):
+            raise RuntimeError("upstream private detail")
+
+    monkeypatch.setattr(control_plane, "SpriteRunner", BrokenRunner)
+    with pytest.raises(HTTPException) as error:
+        control_plane.provision_sprite("acme")
+
+    assert error.value.status_code == 500
+    assert error.value.detail == "Sprite provisioning failed"
+    provisioning = store.get("acme").config["provisioning"]
+    assert provisioning["status"] == "failed"
+    assert provisioning["error_type"] == "RuntimeError"
+    assert "upstream private detail" not in str(provisioning)
+
+
 def test_readiness_and_metrics_use_durable_aggregate_state(tmp_path, monkeypatch):
     store, _ = _tenant_store(tmp_path)
     store.upsert_service_heartbeat("scheduler", "healthy", {"event_count": 0})

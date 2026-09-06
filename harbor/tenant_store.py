@@ -99,7 +99,25 @@ class ServiceHeartbeat:
     updated_at: str
 
 
-LATEST_SCHEMA_VERSION = 8
+@dataclass(frozen=True)
+class OnboardingInvitation:
+    invitation_id: str
+    email: str
+    expires_at: str
+    consumed_at: str | None
+    tenant_id: str | None
+
+
+@dataclass(frozen=True)
+class WebSession:
+    session_id: str
+    tenant_id: str
+    csrf_hash: str
+    expires_at: str
+    created_at: str
+
+
+LATEST_SCHEMA_VERSION = 9
 
 _SCHEMA_MIGRATIONS_SQLITE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -251,6 +269,35 @@ _SQLITE_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             )""",
         ),
     ),
+    (
+        9,
+        "web_onboarding_sessions",
+        (
+            """CREATE TABLE IF NOT EXISTS onboarding_invitations (
+                invitation_id TEXT PRIMARY KEY,
+                code_hash TEXT NOT NULL UNIQUE,
+                email TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                consumed_at TEXT,
+                tenant_id TEXT REFERENCES tenants(tenant_id),
+                created_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS workspace_owners (
+                tenant_id TEXT PRIMARY KEY REFERENCES tenants(tenant_id),
+                email TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS web_sessions (
+                session_id TEXT PRIMARY KEY,
+                token_hash TEXT NOT NULL UNIQUE,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                csrf_hash TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS web_sessions_tenant_idx ON web_sessions (tenant_id)",
+        ),
+    ),
 )
 
 _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
@@ -378,6 +425,35 @@ _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
                 metadata_json JSONB NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL
             )""",
+        ),
+    ),
+    (
+        9,
+        "web_onboarding_sessions",
+        (
+            """CREATE TABLE IF NOT EXISTS onboarding_invitations (
+                invitation_id TEXT PRIMARY KEY,
+                code_hash TEXT NOT NULL UNIQUE,
+                email TEXT NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                consumed_at TIMESTAMPTZ,
+                tenant_id TEXT REFERENCES tenants(tenant_id),
+                created_at TIMESTAMPTZ NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS workspace_owners (
+                tenant_id TEXT PRIMARY KEY REFERENCES tenants(tenant_id),
+                email TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS web_sessions (
+                session_id TEXT PRIMARY KEY,
+                token_hash TEXT NOT NULL UNIQUE,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                csrf_hash TEXT NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS web_sessions_tenant_idx ON web_sessions (tenant_id)",
         ),
     ),
 )
@@ -637,6 +713,290 @@ class TenantStore:
             raise TenantStoreError(f"could not create tenant '{tenant_id}': {e}") from e
         return self.get(tenant_id), api_key
 
+    def create_onboarding_invitation(
+        self,
+        email: str,
+        *,
+        expires_in_hours: int = 24,
+    ) -> tuple[OnboardingInvitation, str]:
+        normalized_email = email.strip().lower()
+        if (
+            len(normalized_email) > 254
+            or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized_email)
+        ):
+            raise TenantStoreError("invitation email is invalid")
+        if expires_in_hours < 1 or expires_in_hours > 168:
+            raise TenantStoreError("invitation lifetime must be between 1 and 168 hours")
+        invitation_id = "invite_" + secrets.token_hex(16)
+        code = "harbor-invite-" + secrets.token_urlsafe(32)
+        now = dt.datetime.now(dt.timezone.utc)
+        expires_at = now + dt.timedelta(hours=expires_in_hours)
+        values = (
+            invitation_id,
+            _hash_key(code),
+            normalized_email,
+            expires_at.isoformat(),
+            now.isoformat(),
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                conn.execute(
+                    """INSERT INTO onboarding_invitations
+                       (invitation_id,code_hash,email,expires_at,created_at)
+                       VALUES (?,?,?,?,?)""",
+                    values,
+                )
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO onboarding_invitations
+                           (invitation_id,code_hash,email,expires_at,created_at)
+                           VALUES (%s,%s,%s,%s,%s)""",
+                        values,
+                    )
+        return (
+            OnboardingInvitation(
+                invitation_id=invitation_id,
+                email=normalized_email,
+                expires_at=expires_at.isoformat(),
+                consumed_at=None,
+                tenant_id=None,
+            ),
+            code,
+        )
+
+    def redeem_onboarding_invitation(
+        self,
+        code: str,
+        email: str,
+        tenant_id: str,
+        name: str,
+        timezone: str,
+        config: dict[str, Any],
+    ) -> tuple[TenantRecord, str]:
+        """Atomically consume an invitation and create its tenant workspace."""
+        validate_non_secret_metadata(config, "tenant.config")
+        normalized_email = email.strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,63}", tenant_id):
+            raise TenantStoreError("generated tenant id is invalid")
+        if not name.strip() or len(name.strip()) > 200:
+            raise TenantStoreError("workspace name is invalid")
+        api_key = issue_tenant_key()
+        now = dt.datetime.now(dt.timezone.utc)
+        now_text = now.isoformat()
+        payload = json.dumps(config)
+        code_hash = _hash_key(code)
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        select_sql = (
+            "SELECT invitation_id,email,expires_at,consumed_at "
+            f"FROM onboarding_invitations WHERE code_hash={placeholder}"
+        )
+        if self.kind == "postgres":
+            select_sql += " FOR UPDATE"
+        try:
+            with self._connect() as conn:
+                if self.kind == "sqlite":
+                    conn.execute("BEGIN IMMEDIATE")
+                    invitation = conn.execute(select_sql, (code_hash,)).fetchone()
+                else:
+                    with conn.cursor() as cur:
+                        cur.execute(select_sql, (code_hash,))
+                        invitation = cur.fetchone()
+                if not invitation:
+                    raise TenantStoreError("invitation code is invalid")
+                if invitation[3] is not None:
+                    raise TenantStoreError("invitation code has already been used")
+                expires_at = dt.datetime.fromisoformat(_time_text(invitation[2]) or "")
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=dt.timezone.utc)
+                if expires_at <= now:
+                    raise TenantStoreError("invitation code has expired")
+                if not hmac.compare_digest(str(invitation[1]), normalized_email):
+                    raise TenantStoreError("email does not match this invitation")
+
+                tenant_values = (
+                    tenant_id,
+                    name.strip(),
+                    timezone,
+                    None,
+                    _hash_key(api_key),
+                    payload,
+                    True,
+                    now_text,
+                    now_text,
+                )
+                if self.kind == "sqlite":
+                    conn.execute(
+                        """INSERT INTO tenants
+                           (tenant_id,name,timezone,sprite_name,api_key_hash,config_json,
+                            active,created_at,updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                        tenant_values,
+                    )
+                    conn.execute(
+                        "INSERT INTO workspace_owners (tenant_id,email,created_at) VALUES (?,?,?)",
+                        (tenant_id, normalized_email, now_text),
+                    )
+                    updated = conn.execute(
+                        """UPDATE onboarding_invitations
+                           SET consumed_at=?,tenant_id=?
+                           WHERE invitation_id=? AND consumed_at IS NULL""",
+                        (now_text, tenant_id, invitation[0]),
+                    ).rowcount
+                else:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO tenants
+                               (tenant_id,name,timezone,sprite_name,api_key_hash,config_json,
+                                active,created_at,updated_at)
+                               VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)""",
+                            tenant_values,
+                        )
+                        cur.execute(
+                            """INSERT INTO workspace_owners
+                               (tenant_id,email,created_at) VALUES (%s,%s,%s)""",
+                            (tenant_id, normalized_email, now_text),
+                        )
+                        cur.execute(
+                            """UPDATE onboarding_invitations
+                               SET consumed_at=%s,tenant_id=%s
+                               WHERE invitation_id=%s AND consumed_at IS NULL""",
+                            (now_text, tenant_id, invitation[0]),
+                        )
+                        updated = cur.rowcount
+                if updated != 1:
+                    raise TenantStoreError("invitation code could not be consumed")
+                self._insert_audit(
+                    conn,
+                    tenant_id,
+                    "tenant.created",
+                    "tenant",
+                    tenant_id,
+                    actor_type="web_onboarding",
+                    metadata={"owner_email": normalized_email},
+                )
+        except TenantStoreError:
+            raise
+        except Exception as error:
+            raise TenantStoreError("workspace could not be created") from error
+        return self.get(tenant_id), api_key
+
+    def create_web_session(
+        self,
+        tenant_id: str,
+        *,
+        expires_in_hours: int = 24 * 30,
+    ) -> tuple[WebSession, str, str]:
+        if expires_in_hours < 1 or expires_in_hours > 24 * 90:
+            raise TenantStoreError("web session lifetime is invalid")
+        tenant = self.get(tenant_id)
+        if not tenant.active:
+            raise TenantStoreError("tenant is inactive")
+        session_id = "session_" + secrets.token_hex(16)
+        token = "harbor-session-" + secrets.token_urlsafe(32)
+        csrf_token = "harbor-csrf-" + secrets.token_urlsafe(32)
+        now = dt.datetime.now(dt.timezone.utc)
+        expires_at = now + dt.timedelta(hours=expires_in_hours)
+        values = (
+            session_id,
+            _hash_key(token),
+            tenant_id,
+            _hash_key(csrf_token),
+            expires_at.isoformat(),
+            now.isoformat(),
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                conn.execute(
+                    """INSERT INTO web_sessions
+                       (session_id,token_hash,tenant_id,csrf_hash,expires_at,created_at)
+                       VALUES (?,?,?,?,?,?)""",
+                    values,
+                )
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO web_sessions
+                           (session_id,token_hash,tenant_id,csrf_hash,expires_at,created_at)
+                           VALUES (%s,%s,%s,%s,%s,%s)""",
+                        values,
+                    )
+        return (
+            WebSession(
+                session_id=session_id,
+                tenant_id=tenant_id,
+                csrf_hash=_hash_key(csrf_token),
+                expires_at=expires_at.isoformat(),
+                created_at=now.isoformat(),
+            ),
+            token,
+            csrf_token,
+        )
+
+    def resolve_web_session(self, token: str) -> WebSession | None:
+        if not token:
+            return None
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        active_predicate = "t.active=1" if self.kind == "sqlite" else "t.active=TRUE"
+        sql = (
+            "SELECT s.session_id,s.tenant_id,s.csrf_hash,s.expires_at,s.created_at "
+            "FROM web_sessions s JOIN tenants t ON t.tenant_id=s.tenant_id "
+            f"WHERE s.token_hash={placeholder} AND {active_predicate}"
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                row = conn.execute(sql, (_hash_key(token),)).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (_hash_key(token),))
+                    row = cur.fetchone()
+        if not row:
+            return None
+        expires_at = dt.datetime.fromisoformat(_time_text(row[3]) or "")
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=dt.timezone.utc)
+        if expires_at <= dt.datetime.now(dt.timezone.utc):
+            return None
+        return WebSession(
+            session_id=row[0],
+            tenant_id=row[1],
+            csrf_hash=row[2],
+            expires_at=expires_at.astimezone(dt.timezone.utc).isoformat(),
+            created_at=_time_text(row[4]) or "",
+        )
+
+    def verify_web_csrf(self, session: WebSession, csrf_token: str) -> bool:
+        return bool(csrf_token) and hmac.compare_digest(
+            session.csrf_hash, _hash_key(csrf_token)
+        )
+
+    def delete_web_session(self, token: str) -> None:
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                conn.execute(
+                    f"DELETE FROM web_sessions WHERE token_hash={placeholder}",
+                    (_hash_key(token),),
+                )
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"DELETE FROM web_sessions WHERE token_hash={placeholder}",
+                        (_hash_key(token),),
+                    )
+
+    def workspace_owner_email(self, tenant_id: str) -> str | None:
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        sql = f"SELECT email FROM workspace_owners WHERE tenant_id={placeholder}"
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                row = conn.execute(sql, (tenant_id,)).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (tenant_id,))
+                    row = cur.fetchone()
+        return str(row[0]) if row else None
+
     def get(self, tenant_id: str) -> TenantRecord:
         placeholder = "?" if self.kind == "sqlite" else "%s"
         sql = (
@@ -705,6 +1065,36 @@ class TenantStore:
                 actor_id=actor_id,
             )
         return self.get(tenant_id)
+
+    def record_provisioning_status(
+        self,
+        tenant_id: str,
+        status: str,
+        *,
+        error_type: str | None = None,
+        actor_type: str = "system",
+    ) -> TenantRecord:
+        if status not in {"pending", "provisioning", "ready", "failed"}:
+            raise TenantStoreError("provisioning status is invalid")
+        record = self.get(tenant_id)
+        config = dict(record.config)
+        config["provisioning"] = {
+            "status": status,
+            "updated_at": _utcnow(),
+            "error_type": error_type if status == "failed" else None,
+        }
+        updated = self.update_config(tenant_id, config, actor_type=actor_type)
+        with self._connect() as conn:
+            self._insert_audit(
+                conn,
+                tenant_id,
+                f"tenant.provisioning.{status}",
+                "sprite",
+                record.sprite_name,
+                actor_type=actor_type,
+                metadata={"status": status, "error_type": error_type},
+            )
+        return updated
 
     def upsert_connection(
         self,

@@ -1,4 +1,5 @@
 import datetime as dt
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -238,6 +239,99 @@ def test_operational_snapshot_applies_schedule_overdue_grace(tmp_path: Path):
         ]
         == 1
     )
+
+
+def test_invitation_redemption_and_web_sessions_store_only_hashes(tmp_path: Path):
+    store = TenantStore(f"sqlite:///{tmp_path / 'onboarding.db'}")
+    invitation, code = store.create_onboarding_invitation("Owner@Example.com")
+    record, api_key = store.redeem_onboarding_invitation(
+        code,
+        "owner@example.com",
+        "new-workspace",
+        "New Workspace",
+        "UTC",
+        {
+            "workers": ["newsletter-intelligence"],
+            "schedule": {"newsletter-intelligence": {"hour": 6, "minute": 0}},
+            "outputs": ["files"],
+            "connections": [],
+            "provisioning": {"status": "pending"},
+        },
+    )
+    session, session_token, csrf_token = store.create_web_session(record.tenant_id)
+
+    assert invitation.email == "owner@example.com"
+    assert store.verify_api_key(record.tenant_id, api_key)
+    assert store.workspace_owner_email(record.tenant_id) == "owner@example.com"
+    assert store.resolve_web_session(session_token) == session
+    assert store.verify_web_csrf(session, csrf_token)
+    assert not store.verify_web_csrf(session, "wrong")
+    with store._connect() as conn:
+        invite_row = conn.execute(
+            "SELECT code_hash,consumed_at,tenant_id FROM onboarding_invitations"
+        ).fetchone()
+        session_row = conn.execute(
+            "SELECT token_hash,csrf_hash FROM web_sessions"
+        ).fetchone()
+        serialized = " ".join(str(value) for value in (*invite_row, *session_row))
+    assert code not in serialized
+    assert session_token not in serialized
+    assert csrf_token not in serialized
+
+    with pytest.raises(TenantStoreError, match="already been used"):
+        store.redeem_onboarding_invitation(
+            code,
+            "owner@example.com",
+            "another-workspace",
+            "Another Workspace",
+            "UTC",
+            {"workers": [], "connections": []},
+        )
+
+    store.delete_web_session(session_token)
+    assert store.resolve_web_session(session_token) is None
+
+
+def test_invitation_rejects_wrong_email_and_expiry(tmp_path: Path):
+    store = TenantStore(f"sqlite:///{tmp_path / 'invite-errors.db'}")
+    _, code = store.create_onboarding_invitation("owner@example.com")
+    with pytest.raises(TenantStoreError, match="does not match"):
+        store.redeem_onboarding_invitation(
+            code,
+            "other@example.com",
+            "wrong-email",
+            "Wrong Email",
+            "UTC",
+            {"workers": [], "connections": []},
+        )
+
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE onboarding_invitations SET expires_at=? WHERE code_hash=?",
+            ("2020-01-01T00:00:00+00:00", hashlib.sha256(code.encode()).hexdigest()),
+        )
+    with pytest.raises(TenantStoreError, match="expired"):
+        store.redeem_onboarding_invitation(
+            code,
+            "owner@example.com",
+            "expired-invite",
+            "Expired Invite",
+            "UTC",
+            {"workers": [], "connections": []},
+        )
+
+
+def test_provisioning_failures_are_durable_and_sanitized(tmp_path: Path):
+    store = TenantStore(f"sqlite:///{tmp_path / 'provisioning.db'}")
+    _create(store)
+    updated = store.record_provisioning_status(
+        "acme", "failed", error_type="SpriteUnavailable", actor_type="web_onboarding"
+    )
+    assert updated.config["provisioning"]["status"] == "failed"
+    assert updated.config["provisioning"]["error_type"] == "SpriteUnavailable"
+    assert "tenant.provisioning.failed" in {
+        event.action for event in store.list_audit("acme")
+    }
 
 
 def test_secret_shaped_connection_metadata_is_rejected(tmp_path: Path):
