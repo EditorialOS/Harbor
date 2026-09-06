@@ -18,9 +18,13 @@ class FakePath:
     def __init__(self, path):
         self.path = path
         self.write = None
+        self.contents = b"report contents"
 
     def write_bytes(self, data, *, mode, mkdir_parents):
         self.write = (data, mode, mkdir_parents)
+
+    def read_bytes(self):
+        return self.contents
 
 
 class FakeFilesystem:
@@ -176,6 +180,9 @@ def test_filesystem_and_exec_use_official_sdk_contract():
     client.write_file("harbor-tenant", "/tmp/run.json", b"{}", mode="0600")
     assert sdk.value.fs.path.path == "tmp/run.json"
     assert sdk.value.fs.path.write == (b"{}", 0o600, True)
+
+    assert client.read_file("harbor-tenant", "/workspace/report.md") == b"report contents"
+    assert sdk.value.fs.path.path == "workspace/report.md"
 
     assert client.exec("harbor-tenant", "echo", "ok") == b"ok\n"
     assert sdk.value.last_command == ("echo", "ok")

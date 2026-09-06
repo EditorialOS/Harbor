@@ -13,6 +13,9 @@ from .sprites_client import SpriteError, SpritesClient
 
 _RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _SPRITE_PYTHON = "/.sprite/bin/python3"
+_REPORT_PATH_PATTERN = re.compile(
+    r"^/workspace/Work/reports/[A-Za-z0-9][A-Za-z0-9._-]{0,255}\.md$"
+)
 
 
 class SpriteRunner:
@@ -109,3 +112,13 @@ class SpriteRunner:
             raise SpriteError(
                 f"connection probe returned non-JSON output: {output[:1000]!r}"
             ) from e
+
+    def read_report(self, sprite_name: str, report_path: str) -> str:
+        """Read only a worker-produced report from the fixed tenant workspace."""
+        if not _REPORT_PATH_PATTERN.fullmatch(report_path):
+            raise SpriteError("worker returned an invalid report path")
+        data = self.client.read_file(sprite_name, report_path)
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise SpriteError("worker report is not valid UTF-8") from e

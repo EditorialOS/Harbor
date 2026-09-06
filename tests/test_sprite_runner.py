@@ -21,6 +21,10 @@ class FakeSpritesClient:
     def write_file(self, sprite, path, data, *, mode="0644"):
         self.writes.append((sprite, path, data, mode))
 
+    def read_file(self, sprite, path):
+        self.read = (sprite, path)
+        return b"# Safe report\n"
+
     def exec(self, sprite, *command):
         self.commands.append((sprite, command))
         if "harbor.sprite_entrypoint" in command:
@@ -118,3 +122,28 @@ def test_connection_probe_uses_private_random_internal_spec_path(
         "-m",
         "harbor.connection_probe",
     )
+
+
+def test_read_report_accepts_only_fixed_workspace_report_paths():
+    client = FakeSpritesClient()
+    runner = SpriteRunner(client)
+
+    assert (
+        runner.read_report(
+            "tenant-sprite", "/workspace/Work/reports/2026-09-06-report.md"
+        )
+        == "# Safe report\n"
+    )
+    assert client.read == (
+        "tenant-sprite",
+        "/workspace/Work/reports/2026-09-06-report.md",
+    )
+
+    for unsafe_path in (
+        "/etc/passwd",
+        "/workspace/Work/reports/../secrets.md",
+        "/workspace/Work/reports/report.txt",
+        "workspace/Work/reports/report.md",
+    ):
+        with pytest.raises(SpriteError, match="invalid report path"):
+            runner.read_report("tenant-sprite", unsafe_path)

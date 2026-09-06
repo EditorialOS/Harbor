@@ -1,5 +1,6 @@
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from harbor import control_plane
 from harbor.tenant_store import TenantStore, TenantStoreError
@@ -243,3 +244,29 @@ def test_tenant_creation_rejects_invalid_schedule_before_persisting(
     assert error.value.status_code == 422
     with pytest.raises(TenantStoreError, match="unknown tenant"):
         store.get("invalid")
+
+
+def test_tenant_can_configure_email_without_provider_credentials(
+    tmp_path, monkeypatch
+):
+    store, key = _tenant_store(tmp_path)
+    monkeypatch.setattr(control_plane, "store", store)
+
+    result = control_plane.update_email_output(
+        "acme",
+        control_plane.EmailOutputUpdate(
+            recipients=["owner@example.com"], subject_prefix="Morning brief"
+        ),
+        authorization=f"Bearer {key}",
+    )
+
+    assert result == {"tenant_id": "acme", "enabled": True, "recipient_count": 1}
+    status = control_plane.tenant_status("acme", authorization=f"Bearer {key}")
+    assert status["email_output"] == {"configured": True, "recipient_count": 1}
+    assert "owner@example.com" not in str(status)
+    assert "email" in status["outputs"]
+
+    with pytest.raises(ValidationError):
+        control_plane.EmailOutputUpdate.model_validate(
+            {"recipients": ["owner@example.com"], "api_key": "never-accepted"}
+        )

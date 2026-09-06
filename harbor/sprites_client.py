@@ -166,6 +166,15 @@ class SpritesClient:
                 f"Sprite file write failed for {sprite}:{path}: {e}"
             ) from e
 
+    def read_file(self, sprite: str, path: str) -> bytes:
+        try:
+            file_path = self._client.sprite(sprite).filesystem("/") / path.lstrip("/")
+            return file_path.read_bytes()
+        except Exception as e:
+            raise SpriteError(
+                f"Sprite file read failed for {sprite}:{path}: {e}"
+            ) from e
+
     def checkpoint(self, sprite: str, comment: str) -> dict[str, str]:
         try:
             stream = self._client.sprite(sprite).create_checkpoint(comment)

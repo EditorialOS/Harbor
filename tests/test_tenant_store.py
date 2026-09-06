@@ -96,6 +96,53 @@ def test_config_updates_and_audit_are_store_owned(tmp_path: Path):
     } <= actions
 
 
+def test_email_configuration_and_delivery_state_are_store_owned(tmp_path: Path):
+    store = TenantStore(f"sqlite:///{tmp_path / 'harbor.db'}")
+    _create(store)
+    record = store.configure_email_output(
+        "acme",
+        enabled=True,
+        recipients=["owner@example.com"],
+        subject_prefix="Morning brief",
+    )
+    assert record.config["outputs"] == ["email"]
+    assert record.config["output_settings"]["email"]["recipients"] == [
+        "owner@example.com"
+    ]
+
+    assert store.claim_run(
+        "run-email", "acme", "newsletter-intelligence", "email-window"
+    )
+    assert store.claim_delivery(
+        "delivery-one",
+        "acme",
+        "run-email",
+        "email",
+        "recipient-fingerprint",
+        "delivery-idempotency-key",
+    )
+    assert not store.claim_delivery(
+        "delivery-two",
+        "acme",
+        "run-email",
+        "email",
+        "recipient-fingerprint",
+        "delivery-idempotency-key",
+    )
+    assert store.begin_delivery_attempt("delivery-one") == 1
+    delivered = store.finish_delivery(
+        "delivery-one", "delivered", provider_message_id="provider-123"
+    )
+    assert delivered.status == "delivered"
+    assert delivered.provider_message_id == "provider-123"
+    assert delivered.delivered_at is not None
+    assert {event.action for event in store.list_audit("acme")} >= {
+        "output.email.configured",
+        "delivery.claimed",
+        "delivery.finished",
+    }
+
+
 def test_secret_shaped_connection_metadata_is_rejected(tmp_path: Path):
     store = TenantStore(f"sqlite:///{tmp_path / 'harbor.db'}")
     _create(store)

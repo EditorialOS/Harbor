@@ -17,13 +17,14 @@ from urllib.parse import urlsplit
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel, ConfigDict, Field
 except ImportError as e:  # pragma: no cover
     raise RuntimeError(
         "Install Harbor's production dependencies to run the control plane"
     ) from e
 
 from .dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
+from .outputs import DeliveryCoordinator, DeliveryError, validate_email_recipient
 from .scheduler import DailySchedule, next_occurrence, parse_daily_schedule
 from .sprite_runner import SpriteRunner
 from .tenant_store import (
@@ -94,6 +95,14 @@ class ScheduleUpdate(BaseModel):
     hour: int = Field(ge=0, le=23)
     minute: int = Field(default=0, ge=0, le=59)
     timezone: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class EmailOutputUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    recipients: list[str] = Field(default_factory=list, max_length=50)
+    subject_prefix: str = Field(default="Harbor Morning Intelligence", max_length=100)
 
 
 @app.get("/healthz")
@@ -251,6 +260,17 @@ def tenant_status(tenant_id: str, authorization: str | None = Header(default=Non
             for worker_id, state in schedule_state.items()
             if state is not None
         },
+        "outputs": record.config.get("outputs", ["files"]),
+        "email_output": {
+            "configured": bool(
+                (record.config.get("output_settings") or {}).get("email")
+            ),
+            "recipient_count": len(
+                (
+                    (record.config.get("output_settings") or {}).get("email") or {}
+                ).get("recipients", [])
+            ),
+        },
         "connections": [
             {
                 "id": c.get("id"),
@@ -294,6 +314,36 @@ def update_worker_schedule(
     }
 
 
+@app.put("/v1/tenants/{tenant_id}/outputs/email")
+def update_email_output(
+    tenant_id: str,
+    req: EmailOutputUpdate,
+    authorization: str | None = Header(default=None),
+):
+    _tenant_auth(tenant_id, authorization)
+    if req.enabled and not req.recipients:
+        raise HTTPException(
+            status_code=422, detail="at least one email recipient is required"
+        )
+    try:
+        recipients = [validate_email_recipient(item) for item in req.recipients]
+        if "\r" in req.subject_prefix or "\n" in req.subject_prefix:
+            raise DeliveryError("email subject prefix is invalid")
+        record = store.configure_email_output(
+            tenant_id,
+            enabled=req.enabled,
+            recipients=recipients,
+            subject_prefix=req.subject_prefix,
+        )
+    except (DeliveryError, TenantStoreError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {
+        "tenant_id": tenant_id,
+        "enabled": "email" in record.config.get("outputs", []),
+        "recipient_count": len(recipients),
+    }
+
+
 @app.post("/v1/tenants/{tenant_id}/workers/{worker_id}/run")
 def run_worker_remote(
     tenant_id: str,
@@ -324,13 +374,15 @@ def run_worker_remote(
 
     idem = req.idempotency_key or ("request_" + secrets.token_urlsafe(24))
     try:
+        runner = SpriteRunner()
         run_id, result = dispatch_worker(
             store,
-            SpriteRunner(),
+            runner,
             record,
             worker_id,
             req.input,
             idem,
+            delivery_handler=DeliveryCoordinator(store, runner).deliver,
         )
     except DuplicateRun as error:
         raise HTTPException(status_code=409, detail=str(error)) from error

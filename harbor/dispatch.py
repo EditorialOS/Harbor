@@ -57,7 +57,9 @@ def build_run_spec(
         "timezone": record.timezone,
         "workspace": "/workspace",
         "workers": record.config.get("workers", []),
-        "outputs": record.config.get("outputs", ["files"]),
+        # Surface/destination configuration stays in the control plane. Workers
+        # produce infrastructure-independent file artifacts inside the Sprite.
+        "outputs": ["files"],
         "schedule": record.config.get("schedule", {}),
         "connections": record.config.get("connections", []),
         "worker": worker_id,
@@ -76,6 +78,10 @@ def dispatch_worker(
     max_attempts: int = 1,
     retry_delay_seconds: float = 0,
     sleeper: Callable[[float], None] = time.sleep,
+    delivery_handler: Callable[
+        [TenantRecord, str, dict[str, Any]], list[dict[str, Any]]
+    ]
+    | None = None,
 ) -> tuple[str, dict[str, Any]]:
     if worker_id not in record.config.get("workers", []):
         raise TenantStoreError("worker not enabled")
@@ -97,6 +103,9 @@ def dispatch_worker(
         try:
             result = runner.run(record.sprite_name, run_spec)
             validate_non_secret_metadata(result, "run.result")
+            if result.get("status") == "completed" and delivery_handler is not None:
+                result["deliveries"] = delivery_handler(record, run_id, result)
+                validate_non_secret_metadata(result["deliveries"], "run.deliveries")
         except Exception as error:  # noqa: BLE001 - durable execution boundary
             # This is the execution boundary: third-party/runtime failures must
             # become durable failed attempts instead of terminating a caller.

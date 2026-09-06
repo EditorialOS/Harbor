@@ -12,6 +12,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
+from .outputs import DeliveryCoordinator
 from .sprite_runner import SpriteRunner
 from .tenant_store import TenantRecord, TenantStore, TenantStoreError
 
@@ -76,12 +77,14 @@ class Scheduler:
         max_attempts: int = 3,
         retry_delay_seconds: float = 2,
         sleeper=time.sleep,
+        delivery_handler=None,
     ):
         self.store = store
         self.runner = runner
         self.max_attempts = max_attempts
         self.retry_delay_seconds = retry_delay_seconds
         self.sleeper = sleeper
+        self.delivery_handler = delivery_handler
 
     def _initialize(
         self,
@@ -171,6 +174,7 @@ class Scheduler:
                         max_attempts=self.max_attempts,
                         retry_delay_seconds=self.retry_delay_seconds,
                         sleeper=self.sleeper,
+                        delivery_handler=self.delivery_handler,
                     )
                 except DuplicateRun as error:
                     run = error.record
@@ -264,11 +268,14 @@ def main() -> None:
     poll_seconds = max(10, int(os.environ.get("HARBOR_SCHEDULER_POLL_SECONDS", "30")))
     max_attempts = int(os.environ.get("HARBOR_SCHEDULER_MAX_ATTEMPTS", "3"))
     retry_delay = float(os.environ.get("HARBOR_SCHEDULER_RETRY_DELAY_SECONDS", "2"))
+    store = TenantStore()
+    runner = SpriteRunner()
     scheduler = Scheduler(
-        TenantStore(),
-        SpriteRunner(),
+        store,
+        runner,
         max_attempts=max_attempts,
         retry_delay_seconds=retry_delay,
+        delivery_handler=DeliveryCoordinator(store, runner).deliver,
     )
     while True:
         for event in scheduler.tick():

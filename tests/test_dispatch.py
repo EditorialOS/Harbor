@@ -89,3 +89,44 @@ def test_dispatch_rejects_secret_shaped_worker_result(tmp_path):
     assert "must-not-persist" not in str(record.result)
     assert "must-not-persist" not in (record.last_error or "")
     assert error.value.result["status"] == "failed"
+
+
+def test_dispatch_retries_delivery_with_same_run_and_worker_spec(tmp_path):
+    store, tenant = _store_and_tenant(tmp_path)
+
+    class Runner:
+        def __init__(self):
+            self.run_ids = []
+
+        def run(self, sprite_name, run_spec):
+            self.run_ids.append(run_spec["run_id"])
+            assert run_spec["outputs"] == ["files"]
+            return {
+                "status": "completed",
+                "deliverables": ["/workspace/Work/reports/report.md"],
+            }
+
+    delivery_calls = []
+
+    def delivery_handler(record, run_id, result):
+        delivery_calls.append(run_id)
+        if len(delivery_calls) == 1:
+            raise RuntimeError("provider unavailable")
+        return [{"delivery_id": "delivery_1", "status": "delivered"}]
+
+    runner = Runner()
+    run_id, result = dispatch_worker(
+        store,
+        runner,
+        tenant,
+        "newsletter-intelligence",
+        {},
+        "delivery-window",
+        max_attempts=2,
+        delivery_handler=delivery_handler,
+    )
+
+    assert runner.run_ids == [run_id, run_id]
+    assert delivery_calls == [run_id, run_id]
+    assert result["attempts"] == 2
+    assert result["deliveries"][0]["status"] == "delivered"

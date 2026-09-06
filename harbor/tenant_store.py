@@ -72,7 +72,24 @@ class ScheduleState:
     updated_at: str
 
 
-LATEST_SCHEMA_VERSION = 4
+@dataclass(frozen=True)
+class DeliveryRecord:
+    delivery_id: str
+    tenant_id: str
+    run_id: str
+    adapter: str
+    destination_fingerprint: str
+    idempotency_key: str
+    status: str
+    provider_message_id: str | None
+    attempt_count: int
+    last_error: str | None
+    created_at: str
+    updated_at: str
+    delivered_at: str | None
+
+
+LATEST_SCHEMA_VERSION = 5
 
 _SCHEMA_MIGRATIONS_SQLITE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -174,6 +191,29 @@ _SQLITE_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             )""",
         ),
     ),
+    (
+        5,
+        "durable_output_deliveries",
+        (
+            """CREATE TABLE IF NOT EXISTS deliveries (
+                delivery_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                run_id TEXT NOT NULL REFERENCES runs(run_id),
+                adapter TEXT NOT NULL,
+                destination_fingerprint TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                provider_message_id TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                delivered_at TEXT,
+                UNIQUE (tenant_id, adapter, idempotency_key)
+            )""",
+            "CREATE INDEX IF NOT EXISTS deliveries_tenant_created_idx ON deliveries (tenant_id, created_at DESC)",
+        ),
+    ),
 )
 
 _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
@@ -250,6 +290,30 @@ _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
                 updated_at TIMESTAMPTZ NOT NULL,
                 PRIMARY KEY (tenant_id, worker_id)
             )""",
+        ),
+    ),
+    (
+        5,
+        "durable_output_deliveries",
+        (
+            """CREATE TABLE IF NOT EXISTS deliveries (
+                delivery_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                run_id TEXT NOT NULL REFERENCES runs(run_id),
+                adapter TEXT NOT NULL,
+                destination_fingerprint TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                provider_message_id TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                delivered_at TIMESTAMPTZ
+            )""",
+            """CREATE UNIQUE INDEX IF NOT EXISTS deliveries_tenant_adapter_idempotency_uidx
+                ON deliveries (tenant_id, adapter, idempotency_key)""",
+            "CREATE INDEX IF NOT EXISTS deliveries_tenant_created_idx ON deliveries (tenant_id, created_at DESC)",
         ),
     ),
 )
@@ -756,6 +820,70 @@ class TenantStore:
             )
         return self.get(tenant_id)
 
+    def configure_email_output(
+        self,
+        tenant_id: str,
+        *,
+        enabled: bool,
+        recipients: list[str],
+        subject_prefix: str,
+        actor_type: str = "tenant_api",
+        actor_id: str | None = None,
+    ) -> TenantRecord:
+        email_settings = {
+            "recipients": recipients,
+            "subject_prefix": subject_prefix,
+        }
+        validate_non_secret_metadata(email_settings, "tenant.output_settings.email")
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        select_sql = f"SELECT config_json FROM tenants WHERE tenant_id={placeholder}"
+        if self.kind == "postgres":
+            select_sql += " FOR UPDATE"
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(select_sql, (tenant_id,)).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(select_sql, (tenant_id,))
+                    row = cur.fetchone()
+            if not row:
+                raise TenantStoreError(f"unknown tenant '{tenant_id}'")
+            config = json.loads(row[0]) if isinstance(row[0], str) else dict(row[0])
+            outputs = [item for item in config.get("outputs", []) if item != "email"]
+            output_settings = dict(config.get("output_settings") or {})
+            if enabled:
+                outputs.append("email")
+                output_settings["email"] = email_settings
+            else:
+                output_settings.pop("email", None)
+            config["outputs"] = outputs
+            config["output_settings"] = output_settings
+            payload = json.dumps(config)
+            now = _utcnow()
+            if self.kind == "sqlite":
+                conn.execute(
+                    "UPDATE tenants SET config_json=?,updated_at=? WHERE tenant_id=?",
+                    (payload, now, tenant_id),
+                )
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE tenants SET config_json=%s::jsonb,updated_at=%s WHERE tenant_id=%s",
+                        (payload, now, tenant_id),
+                    )
+            self._insert_audit(
+                conn,
+                tenant_id,
+                "output.email.configured" if enabled else "output.email.disabled",
+                "output",
+                "email",
+                actor_type=actor_type,
+                actor_id=actor_id,
+                metadata={"enabled": enabled, "recipient_count": len(recipients)},
+            )
+        return self.get(tenant_id)
+
     def record_connection_verification(
         self,
         tenant_id: str,
@@ -1128,6 +1256,215 @@ class TenantStore:
         if state is None:  # pragma: no cover - defensive after successful upsert
             raise TenantStoreError("schedule state was not persisted")
         return state
+
+    def claim_delivery(
+        self,
+        delivery_id: str,
+        tenant_id: str,
+        run_id: str,
+        adapter: str,
+        destination_fingerprint: str,
+        idempotency_key: str,
+    ) -> bool:
+        now = _utcnow()
+        values = (
+            delivery_id,
+            tenant_id,
+            run_id,
+            adapter,
+            destination_fingerprint,
+            idempotency_key,
+            "pending",
+            now,
+            now,
+        )
+        try:
+            with self._connect() as conn:
+                if self.kind == "sqlite":
+                    conn.execute(
+                        """INSERT INTO deliveries
+                           (delivery_id,tenant_id,run_id,adapter,destination_fingerprint,
+                            idempotency_key,status,created_at,updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                        values,
+                    )
+                else:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO deliveries
+                               (delivery_id,tenant_id,run_id,adapter,destination_fingerprint,
+                                idempotency_key,status,created_at,updated_at)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            values,
+                        )
+                self._insert_audit(
+                    conn,
+                    tenant_id,
+                    "delivery.claimed",
+                    "delivery",
+                    delivery_id,
+                    metadata={"adapter": adapter, "run_id": run_id},
+                )
+            return True
+        except sqlite3.IntegrityError as error:
+            if "deliveries.tenant_id, deliveries.adapter, deliveries.idempotency_key" in str(
+                error
+            ):
+                return False
+            raise TenantStoreError(
+                f"could not claim delivery '{delivery_id}': {error}"
+            ) from error
+        except Exception as error:
+            if self.kind == "postgres":
+                try:
+                    from psycopg.errors import UniqueViolation  # type: ignore
+
+                    if (
+                        isinstance(error, UniqueViolation)
+                        and getattr(error.diag, "constraint_name", None)
+                        == "deliveries_tenant_adapter_idempotency_uidx"
+                    ):
+                        return False
+                except ImportError:
+                    pass
+            if isinstance(error, TenantStoreError):
+                raise
+            raise TenantStoreError(
+                f"could not claim delivery '{delivery_id}': {error}"
+            ) from error
+
+    def _delivery_from_row(self, row: Any) -> DeliveryRecord:
+        return DeliveryRecord(
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+            row[5],
+            row[6],
+            row[7],
+            int(row[8]),
+            row[9],
+            _time_text(row[10]) or "",
+            _time_text(row[11]) or "",
+            _time_text(row[12]),
+        )
+
+    def get_delivery_by_idempotency(
+        self, tenant_id: str, adapter: str, idempotency_key: str
+    ) -> DeliveryRecord | None:
+        placeholders = ("?", "?", "?") if self.kind == "sqlite" else ("%s", "%s", "%s")
+        sql = (
+            "SELECT delivery_id,tenant_id,run_id,adapter,destination_fingerprint,"
+            "idempotency_key,status,provider_message_id,attempt_count,last_error,"
+            "created_at,updated_at,delivered_at FROM deliveries WHERE "
+            f"tenant_id={placeholders[0]} AND adapter={placeholders[1]} "
+            f"AND idempotency_key={placeholders[2]}"
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                row = conn.execute(
+                    sql, (tenant_id, adapter, idempotency_key)
+                ).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (tenant_id, adapter, idempotency_key))
+                    row = cur.fetchone()
+        return self._delivery_from_row(row) if row else None
+
+    def get_delivery(self, delivery_id: str) -> DeliveryRecord:
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        sql = (
+            "SELECT delivery_id,tenant_id,run_id,adapter,destination_fingerprint,"
+            "idempotency_key,status,provider_message_id,attempt_count,last_error,"
+            f"created_at,updated_at,delivered_at FROM deliveries WHERE delivery_id={placeholder}"
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                row = conn.execute(sql, (delivery_id,)).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (delivery_id,))
+                    row = cur.fetchone()
+        if not row:
+            raise TenantStoreError(f"unknown delivery '{delivery_id}'")
+        return self._delivery_from_row(row)
+
+    def begin_delivery_attempt(self, delivery_id: str) -> int:
+        now = _utcnow()
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                conn.execute(
+                    """UPDATE deliveries SET status='delivering',
+                       attempt_count=attempt_count+1,last_error=NULL,updated_at=?
+                       WHERE delivery_id=?""",
+                    (now, delivery_id),
+                )
+                row = conn.execute(
+                    "SELECT attempt_count FROM deliveries WHERE delivery_id=?",
+                    (delivery_id,),
+                ).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE deliveries SET status='delivering',
+                           attempt_count=attempt_count+1,last_error=NULL,updated_at=%s
+                           WHERE delivery_id=%s RETURNING attempt_count""",
+                        (now, delivery_id),
+                    )
+                    row = cur.fetchone()
+        if not row:
+            raise TenantStoreError(f"unknown delivery '{delivery_id}'")
+        return int(row[0])
+
+    def finish_delivery(
+        self,
+        delivery_id: str,
+        status: str,
+        *,
+        provider_message_id: str | None = None,
+        last_error: str | None = None,
+    ) -> DeliveryRecord:
+        if status not in {"delivered", "failed"}:
+            raise TenantStoreError("delivery status must be delivered or failed")
+        if provider_message_id is not None and len(provider_message_id) > 255:
+            raise TenantStoreError("provider message id is too long")
+        now = _utcnow()
+        delivered_at = now if status == "delivered" else None
+        values = (status, provider_message_id, last_error, now, delivered_at, delivery_id)
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                cur = conn.execute(
+                    """UPDATE deliveries SET status=?,provider_message_id=?,last_error=?,
+                       updated_at=?,delivered_at=? WHERE delivery_id=?""",
+                    values,
+                )
+                rowcount = cur.rowcount
+                tenant_row = conn.execute(
+                    "SELECT tenant_id FROM deliveries WHERE delivery_id=?",
+                    (delivery_id,),
+                ).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE deliveries SET status=%s,provider_message_id=%s,last_error=%s,
+                           updated_at=%s,delivered_at=%s WHERE delivery_id=%s
+                           RETURNING tenant_id""",
+                        values,
+                    )
+                    tenant_row = cur.fetchone()
+                    rowcount = cur.rowcount
+            if rowcount != 1 or not tenant_row:
+                raise TenantStoreError(f"unknown delivery '{delivery_id}'")
+            self._insert_audit(
+                conn,
+                tenant_row[0],
+                "delivery.finished",
+                "delivery",
+                delivery_id,
+                metadata={"status": status},
+            )
+        return self.get_delivery(delivery_id)
 
     def finish_run(self, run_id: str, status: str, result: dict[str, Any]) -> None:
         now = _utcnow()

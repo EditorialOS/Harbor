@@ -61,6 +61,29 @@ def test_postgres_migrations_scoping_and_audit(postgres_store: TenantStore):
     assert state.last_window_key == scheduled_window
     assert state.last_status == "completed"
     assert state.attempt_count == 1
+    configured = postgres_store.configure_email_output(
+        tenant_a,
+        enabled=True,
+        recipients=["owner@example.com"],
+        subject_prefix="Morning brief",
+    )
+    assert "email" in configured.config["outputs"]
+    delivery_id = f"delivery-{suffix}"
+    assert postgres_store.claim_delivery(
+        delivery_id,
+        tenant_a,
+        scheduled_run,
+        "email",
+        "recipient-fingerprint",
+        f"delivery-key-{suffix}",
+    )
+    assert postgres_store.begin_delivery_attempt(delivery_id) == 1
+    assert (
+        postgres_store.finish_delivery(
+            delivery_id, "delivered", provider_message_id="provider-123"
+        ).status
+        == "delivered"
+    )
     assert "run.claimed" in {
         event.action for event in postgres_store.list_audit(tenant_a)
     }
