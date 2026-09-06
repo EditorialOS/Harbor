@@ -13,6 +13,8 @@ from dataclasses import asdict
 from .config import load_tenant
 from .runtime import run_worker
 from .worker import catalog as _worker_catalog
+from .workers import alex as _alex  # noqa: F401
+from .workers import newsletter_intelligence as _newsletter  # noqa: F401
 
 
 def _tenant_path(path: str | None = None) -> str:
@@ -47,9 +49,9 @@ def harbor_run_worker(worker: str, input: dict | None = None, tenant_config: str
 
 
 try:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server import MCPServer
 
-    app = FastMCP("harbor")
+    app = MCPServer("harbor-local")
     app.tool()(harbor_worker_catalog)
     app.tool()(harbor_status)
     app.tool()(harbor_run_worker)

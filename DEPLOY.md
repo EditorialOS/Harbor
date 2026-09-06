@@ -147,10 +147,43 @@ after downtime.
 
 ## 10. What remains before paid pilot
 
-- email output adapter;
+- a verified email-provider account and sender identity;
 - monitoring/alerts;
 - connector onboarding UX;
-- remote MCP tenant auth;
 - second-tenant isolation test.
+
+## Email output
+
+Harbor's first output adapter uses Resend. Store `RESEND_API_KEY` as a Fly app
+secret and configure `HARBOR_EMAIL_FROM` as deployment state only after the
+sender address or domain is verified with the provider. Never put the provider
+key in a tenant request.
+
+Enable email for a tenant through its authenticated API:
+
+```bash
+curl -X PUT "https://$HARBOR_FLY_APP.fly.dev/v1/tenants/pilot/outputs/email" \
+  -H "Authorization: Bearer $PILOT_HARBOR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true,"recipients":["owner@example.com"],"subject_prefix":"Harbor Morning Intelligence"}'
+```
+
+The next completed worker run reads only its fixed Sprite report path, sends
+both HTML and text, and persists a delivery record. Retries reuse the same
+provider idempotency key.
+
+## Remote MCP
+
+The production Streamable HTTP endpoint is:
+
+```text
+https://<harbor-app>.fly.dev/mcp/
+```
+
+Clients that support custom headers authenticate with the tenant's Harbor key
+as an HTTP bearer token. MCP tools never accept a tenant id, tenant config path,
+or filesystem path. ChatGPT end-user installation still requires a proper OAuth
+authorization flow and must not be represented as complete until that flow is
+implemented and tested.
 
 See `CODEX_NEXT.md` and `docs/PRODUCTION_PLAN.md`.

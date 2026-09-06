@@ -39,4 +39,8 @@ database. CI supplies an ephemeral PostgreSQL service automatically.
 
 ## Production boundary
 
-This package is deployment-ready scaffolding, not a claim that Harbor is already live. A real deployment requires a Fly account/organization, `SPRITE_TOKEN`, Postgres, and a real customer connector. Once those are supplied, the next milestone is one live beehiiv tenant end-to-end on Fly.
+This alpha now has verified live-pilot evidence for its Fly control plane,
+Postgres state, tenant Sprite, restricted beehiiv connector, and unattended
+scheduled execution. It is not beta or production-ready: real email delivery,
+monitoring, a second-tenant isolation proof, and end-user onboarding remain
+acceptance gates.

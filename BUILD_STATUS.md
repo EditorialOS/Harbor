@@ -46,7 +46,7 @@
 - A sanitized regression fixture preserves the verified beehiiv response shape
   without retaining customer content or credentials.
 
-## Scheduler implemented, pending paid Machine deployment
+## Scheduler and unattended live execution completed
 
 - A dedicated Fly process group discovers tenant schedules from Postgres.
 - Schedule state persists next run, last run, status, attempts, and errors.
@@ -56,15 +56,34 @@
   control-plane API; customer-specific values remain database state.
 - Long outages execute at most one overdue window rather than creating a
   backlog storm.
+- The dedicated scheduler Machine is deployed and a real scheduled beehiiv
+  pull completed without operator intervention.
+- Expiring run leases let a restarted scheduler reclaim an interrupted run
+  without changing its run id or delivery idempotency key.
 
-## Still required for first live pilot
+## Output and product surfaces implemented
 
-- Deploy the scheduler process group on one additional paid Fly Machine and
-  verify one scheduled live pull.
-- Email delivery adapter.
+- Email delivery renders the Sprite report as escaped HTML and plain text.
+- Delivery claims, attempts, provider receipt ids, failures, and deduplication
+  are durable Postgres state; recipients remain tenant runtime metadata.
+- The email provider credential is accepted only from the control-plane secret
+  environment and is never included in run specs, tenant state, or reports.
+- A stateless Streamable HTTP MCP endpoint is mounted at `/mcp`, authenticates
+  tenant bearer keys before parsing MCP requests, and resolves tenant identity
+  from the credential rather than a tool argument.
+- MCP exposes worker catalog, safe tenant status, enabled workers, recent runs,
+  and idempotent worker execution. Its schemas expose no tenant-config or
+  filesystem-path parameter.
+
+## Still required for first delivered pilot
+
+- Configure and verify a real email provider account, sending identity, and
+  recipient; the adapter is deployed but intentionally not enabled without
+  those external items.
 - Monitoring/alerts around the implemented retry policy.
-- Authenticated remote MCP surface.
 - second-tenant isolation test.
+- OAuth-based end-user onboarding for ChatGPT; direct bearer-authenticated MCP
+  is available to clients that support custom authorization headers.
 
 ## Deliberately not faked
 

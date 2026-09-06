@@ -27,6 +27,7 @@ def test_remote_run_rejects_mock_secrets_and_reserved_fields(tmp_path, monkeypat
         {"mode": "mock"},
         {"api_key": "never"},
         {"_harbor_run_id": "spoof"},
+        {"path": "/etc/passwd"},
     ):
         with pytest.raises(HTTPException) as error:
             control_plane.run_worker_remote(

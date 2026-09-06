@@ -90,7 +90,7 @@ class DeliveryRecord:
     delivered_at: str | None
 
 
-LATEST_SCHEMA_VERSION = 6
+LATEST_SCHEMA_VERSION = 7
 
 _SCHEMA_MIGRATIONS_SQLITE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -223,6 +223,13 @@ _SQLITE_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             "UPDATE runs SET lease_expires_at=started_at WHERE status='running'",
         ),
     ),
+    (
+        7,
+        "indexed_tenant_api_key_hashes",
+        (
+            "CREATE INDEX IF NOT EXISTS tenants_api_key_hash_idx ON tenants (api_key_hash)",
+        ),
+    ),
 )
 
 _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
@@ -331,6 +338,13 @@ _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
         (
             "ALTER TABLE runs ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
             "UPDATE runs SET lease_expires_at=started_at WHERE status='running' AND lease_expires_at IS NULL",
+        ),
+    ),
+    (
+        7,
+        "indexed_tenant_api_key_hashes",
+        (
+            "CREATE INDEX IF NOT EXISTS tenants_api_key_hash_idx ON tenants (api_key_hash)",
         ),
     ),
 )
@@ -1044,6 +1058,25 @@ class TenantStore:
                     row = cur.fetchone()
         return bool(row and hmac.compare_digest(row[0], _hash_key(candidate)))
 
+    def resolve_api_key(self, candidate: str) -> TenantRecord | None:
+        """Resolve a bearer token to one active tenant without caller-supplied identity."""
+        if not candidate:
+            return None
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        active = "1" if self.kind == "sqlite" else "TRUE"
+        sql = (
+            "SELECT tenant_id FROM tenants "
+            f"WHERE api_key_hash={placeholder} AND active={active}"
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                rows = conn.execute(sql, (_hash_key(candidate),)).fetchall()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (_hash_key(candidate),))
+                    rows = cur.fetchall()
+        return self.get(rows[0][0]) if len(rows) == 1 else None
+
     def claim_run(
         self,
         run_id: str,
@@ -1229,6 +1262,43 @@ class TenantStore:
             row[9],
             _time_text(row[10]),
         )
+
+    def list_runs(self, tenant_id: str, limit: int = 20) -> list[RunRecord]:
+        if limit < 1 or limit > 100:
+            raise TenantStoreError("run limit must be between 1 and 100")
+        placeholders = ("?", "?") if self.kind == "sqlite" else ("%s", "%s")
+        sql = (
+            "SELECT run_id,tenant_id,worker_id,idempotency_key,status,result_json,"
+            "started_at,finished_at,attempt_count,last_error,lease_expires_at "
+            f"FROM runs WHERE tenant_id={placeholders[0]} "
+            f"ORDER BY started_at DESC LIMIT {placeholders[1]}"
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                rows = conn.execute(sql, (tenant_id, limit)).fetchall()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (tenant_id, limit))
+                    rows = cur.fetchall()
+        records = []
+        for row in rows:
+            result = json.loads(row[5]) if isinstance(row[5], str) else row[5]
+            records.append(
+                RunRecord(
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    result,
+                    _time_text(row[6]) or "",
+                    _time_text(row[7]),
+                    int(row[8]),
+                    row[9],
+                    _time_text(row[10]),
+                )
+            )
+        return records
 
     def get_schedule_state(
         self, tenant_id: str, worker_id: str

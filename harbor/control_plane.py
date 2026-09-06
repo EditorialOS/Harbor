@@ -7,6 +7,7 @@ at run time; provider credentials live in Fly Sprites Connectors.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import os
@@ -25,6 +26,7 @@ except ImportError as e:  # pragma: no cover
 
 from .dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
 from .outputs import DeliveryCoordinator, DeliveryError, validate_email_recipient
+from .remote_mcp import create_remote_mcp
 from .scheduler import DailySchedule, next_occurrence, parse_daily_schedule
 from .sprite_runner import SpriteRunner
 from .tenant_store import (
@@ -33,8 +35,20 @@ from .tenant_store import (
     validate_non_secret_metadata,
 )
 
-app = FastAPI(title="Harbor Control Plane", version="0.9.0-alpha")
 store = TenantStore()
+remote_mcp = create_remote_mcp(store)
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    async with remote_mcp.server.session_manager.run():
+        yield
+
+
+app = FastAPI(
+    title="Harbor Control Plane", version="0.9.0-alpha", lifespan=_lifespan
+)
+app.mount("/mcp", remote_mcp.app)
 
 
 def _slug(value: str) -> str:
@@ -365,6 +379,11 @@ def run_worker_remote(
         raise HTTPException(
             status_code=400,
             detail="run input contains a reserved Harbor field",
+        )
+    if req.input:
+        raise HTTPException(
+            status_code=400,
+            detail="this worker does not accept remote run input fields",
         )
     record = store.get(tenant_id)
     if worker_id not in record.config.get("workers", []):

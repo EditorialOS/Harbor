@@ -25,10 +25,13 @@ def test_postgres_migrations_scoping_and_audit(postgres_store: TenantStore):
     tenant_a = f"pg-a-{suffix}"
     tenant_b = f"pg-b-{suffix}"
     config = {"workers": ["newsletter-intelligence"], "connections": []}
-    postgres_store.create_tenant(tenant_a, "Postgres A", "UTC", config)
+    record_a, key_a = postgres_store.create_tenant(
+        tenant_a, "Postgres A", "UTC", config
+    )
     postgres_store.create_tenant(tenant_b, "Postgres B", "UTC", config)
 
     assert postgres_store.schema_version == LATEST_SCHEMA_VERSION
+    assert postgres_store.resolve_api_key(key_a) == record_a
     assert postgres_store.claim_run(
         f"run-a-{suffix}", tenant_a, "newsletter-intelligence", "same-window"
     )
@@ -53,6 +56,10 @@ def test_postgres_migrations_scoping_and_audit(postgres_store: TenantStore):
         )
     assert postgres_store.reclaim_stale_run(recoverable_run, lease_seconds=60)
     assert not postgres_store.reclaim_stale_run(recoverable_run, lease_seconds=60)
+    assert {run.run_id for run in postgres_store.list_runs(tenant_a)} >= {
+        f"run-a-{suffix}",
+        recoverable_run,
+    }
     scheduled_run = f"run-scheduled-{suffix}"
     scheduled_window = f"schedule-v1:2026-09-06:0600:UTC:{suffix}"
     assert postgres_store.claim_run(

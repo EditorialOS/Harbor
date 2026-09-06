@@ -32,10 +32,13 @@ def test_tenant_store_issues_and_verifies_key(tmp_path: Path):
     assert key.startswith("harbor_")
     assert store.verify_api_key("acme", key)
     assert not store.verify_api_key("acme", key + "x")
+    assert store.resolve_api_key(key) == record
+    assert store.resolve_api_key(key + "x") is None
     assert store.schema_version == LATEST_SCHEMA_VERSION
 
     store.set_active("acme", False)
     assert not store.verify_api_key("acme", key)
+    assert store.resolve_api_key(key) is None
 
 
 def test_run_idempotency(tmp_path: Path):
@@ -46,6 +49,8 @@ def test_run_idempotency(tmp_path: Path):
     assert not store.claim_run("run2", "acme", "newsletter-intelligence", "same-window")
     assert store.claim_run("run3", "beta", "newsletter-intelligence", "same-window")
     assert store.claim_run("run4", "acme", "another-worker", "same-window")
+    assert [run.run_id for run in store.list_runs("acme")] == ["run4", "run1"]
+    assert [run.run_id for run in store.list_runs("beta")] == ["run3"]
 
 
 def test_run_lease_can_only_be_reclaimed_after_expiry(tmp_path: Path):
