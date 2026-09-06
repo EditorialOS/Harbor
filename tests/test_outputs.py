@@ -73,6 +73,8 @@ def test_markdown_renderer_produces_text_and_escaped_html():
     assert "<strong>Growth:</strong>" in rendered
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
     assert "<script>" not in rendered
+    assert 'margin:auto;">' in rendered
+    assert 'margin:auto;><h1' not in rendered
 
 
 def test_recipient_validation_rejects_header_injection_and_invalid_addresses():

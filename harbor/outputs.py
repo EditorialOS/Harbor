@@ -104,8 +104,8 @@ def render_markdown_email(markdown: str) -> tuple[str, str]:
     body = "\n".join(html_lines)
     html_document = (
         '<!doctype html><html><body style="font-family:-apple-system,BlinkMacSystemFont,'
-        "Segoe UI,sans-serif;line-height:1.5;color:#171717;max-width:680px;margin:auto;"
-        f">{body}</body></html>"
+        'Segoe UI,sans-serif;line-height:1.5;color:#171717;max-width:680px;margin:auto;">'
+        f"{body}</body></html>"
     )
     return "\n".join(text_lines).strip() + "\n", html_document
 
