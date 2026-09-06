@@ -1,0 +1,40 @@
+{
+  "publication": {
+    "data": {
+      "id": "pub_sanitized",
+      "name": "Sanitized publication",
+      "organization_name": "Sanitized organization",
+      "stats": {
+        "active_subscriptions": 0,
+        "total_subscriptions": 0,
+        "average_open_rate": 0.0,
+        "average_click_rate": 0.0
+      }
+    }
+  },
+  "posts": {
+    "data": [
+      {
+        "id": "post_sanitized",
+        "title": "Sanitized issue",
+        "displayed_date": "2026-09-05T12:00:00Z",
+        "stats": {
+          "email": {
+            "recipients": 0,
+            "opens": 0,
+            "clicks": 0,
+            "open_rate": 0.0,
+            "click_rate": 0.0
+          },
+          "web": {
+            "views": 0
+          }
+        }
+      }
+    ],
+    "limit": 5,
+    "page": 1,
+    "total_results": 1,
+    "total_pages": 1
+  }
+}
