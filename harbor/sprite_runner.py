@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,7 @@ class SpriteRunner:
             "pip",
             "install",
             "--upgrade",
+            "--force-reinstall",
             remote_wheel,
         )
         self.client.exec(
@@ -80,4 +82,30 @@ class SpriteRunner:
         except Exception as e:
             raise SpriteError(
                 f"worker returned non-JSON output: {output[:1000]!r}"
+            ) from e
+
+    def verify_connection(
+        self, sprite_name: str, connection_spec: dict[str, Any]
+    ) -> dict[str, Any]:
+        probe_id = secrets.token_hex(12)
+        spec_path = f"/tmp/harbor-connections/{probe_id}.json"
+        self.client.write_file(
+            sprite_name,
+            spec_path,
+            json.dumps(connection_spec).encode(),
+            mode="0600",
+        )
+        output = self.client.exec(
+            sprite_name,
+            _SPRITE_PYTHON,
+            "-m",
+            "harbor.connection_probe",
+            "--spec",
+            spec_path,
+        )
+        try:
+            return json.loads(output.decode())
+        except Exception as e:
+            raise SpriteError(
+                f"connection probe returned non-JSON output: {output[:1000]!r}"
             ) from e

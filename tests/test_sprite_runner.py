@@ -25,6 +25,8 @@ class FakeSpritesClient:
         self.commands.append((sprite, command))
         if "harbor.sprite_entrypoint" in command:
             return b'{"status":"completed"}'
+        if "harbor.connection_probe" in command:
+            return b'{"status":"verified","provider":"beehiiv"}'
         return b""
 
     def checkpoint(self, sprite, comment):
@@ -42,6 +44,7 @@ def test_provision_preserves_valid_wheel_filename(tmp_path: Path, monkeypatch):
     assert result["sprite_name"] == "tenant-sprite"
     assert client.writes[0][1] == f"/tmp/{wheel.name}"
     assert client.commands[0][1][0] == "/.sprite/bin/python3"
+    assert "--force-reinstall" in client.commands[0][1]
     assert client.commands[0][1][-1] == f"/tmp/{wheel.name}"
 
 
@@ -92,3 +95,26 @@ def test_run_rejects_path_like_or_missing_run_ids(monkeypatch, tmp_path: Path):
     for run_id in (None, "../escape", "/tmp/escape", "has spaces"):
         with pytest.raises(SpriteError, match="invalid run_id"):
             runner.run("tenant-sprite", {"run_id": run_id})
+
+
+def test_connection_probe_uses_private_random_internal_spec_path(
+    monkeypatch, tmp_path: Path
+):
+    wheel = tmp_path / "harbor_ai_worker_runtime-0.9.0a0-py3-none-any.whl"
+    wheel.write_bytes(b"wheel bytes")
+    monkeypatch.setenv("HARBOR_RUNTIME_WHEEL", str(wheel))
+    client = FakeSpritesClient()
+
+    result = SpriteRunner(client).verify_connection(
+        "tenant-sprite", {"provider": "beehiiv"}
+    )
+
+    assert result == {"status": "verified", "provider": "beehiiv"}
+    assert client.writes[0][1].startswith("/tmp/harbor-connections/")
+    assert client.writes[0][1].endswith(".json")
+    assert client.writes[0][3] == "0600"
+    assert client.commands[0][1][:3] == (
+        "/.sprite/bin/python3",
+        "-m",
+        "harbor.connection_probe",
+    )

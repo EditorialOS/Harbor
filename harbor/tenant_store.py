@@ -558,6 +558,63 @@ class TenantStore:
             )
         return self.get(tenant_id)
 
+    def record_connection_verification(
+        self,
+        tenant_id: str,
+        connection_id: str,
+        result: dict[str, Any],
+        *,
+        actor_type: str = "system",
+        actor_id: str | None = None,
+    ) -> TenantRecord:
+        validate_non_secret_metadata(result, "connection.verification")
+        status = result.get("status")
+        if status not in {"verified", "failed"}:
+            raise TenantStoreError("connection verification status is invalid")
+
+        record = self.get(tenant_id)
+        found = False
+        connections = []
+        for item in record.config.get("connections", []):
+            connection = dict(item)
+            if connection.get("id") == connection_id:
+                found = True
+                connection["status"] = status
+                connection["last_verified_at"] = result.get("checked_at") or _utcnow()
+                if status == "verified":
+                    connection["last_error"] = None
+                    connection["sync"] = {
+                        "publication_id": result.get("publication_id"),
+                        "publication_name": result.get("publication_name"),
+                        "last_success_at": result.get("checked_at") or _utcnow(),
+                    }
+                else:
+                    connection["last_error"] = result.get("error") or {
+                        "kind": "connection_failed",
+                        "detail": "connection verification failed",
+                    }
+            connections.append(connection)
+        if not found:
+            raise TenantStoreError(f"unknown connection '{connection_id}'")
+
+        config = dict(record.config)
+        config["connections"] = connections
+        updated = self.update_config(
+            tenant_id, config, actor_type=actor_type, actor_id=actor_id
+        )
+        with self._connect() as conn:
+            self._insert_audit(
+                conn,
+                tenant_id,
+                "connection.verified" if status == "verified" else "connection.failed",
+                "connection",
+                connection_id,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                metadata={"status": status},
+            )
+        return updated
+
     def set_sprite(
         self,
         tenant_id: str,

@@ -77,7 +77,7 @@ class ConnectionAttach(BaseModel):
     provider: str = Field(
         min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9._-]*$"
     )
-    id: str = Field(min_length=1, max_length=255)
+    id: str = Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9_-]+$")
     gateway_base_url: str
     settings: dict[str, Any] = Field(default_factory=dict)
 
@@ -140,9 +140,23 @@ def attach_connection(tenant_id: str, req: ConnectionAttach):
         raise HTTPException(
             status_code=422, detail="gateway_base_url must not contain credentials"
         )
+    expected_path = re.compile(
+        rf"^/v1/gateway/[a-z0-9_-]+/{re.escape(req.id)}/?$"
+    )
+    if (
+        parsed_gateway.hostname != "api.sprites.dev"
+        or parsed_gateway.query
+        or parsed_gateway.fragment
+        or not expected_path.fullmatch(parsed_gateway.path)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="gateway_base_url must identify this connection on the Sprites gateway",
+        )
     connection = {
         "id": req.id,
         "provider": req.provider,
+        "status": "pending",
         "settings": {
             **req.settings,
             "gateway_base_url": req.gateway_base_url,
@@ -150,10 +164,48 @@ def attach_connection(tenant_id: str, req: ConnectionAttach):
         },
     }
     try:
-        store.upsert_connection(tenant_id, connection, actor_type="admin_api")
+        record = store.upsert_connection(
+            tenant_id, connection, actor_type="admin_api"
+        )
+        if not record.sprite_name:
+            raise TenantStoreError("tenant Sprite is not provisioned")
+        connection_spec = {
+            "tenant_id": record.tenant_id,
+            "name": record.name,
+            "timezone": record.timezone,
+            "workspace": "/workspace",
+            "workers": record.config.get("workers", []),
+            "outputs": record.config.get("outputs", ["files"]),
+            "connections": record.config.get("connections", []),
+            "provider": req.provider,
+        }
+        result = SpriteRunner().verify_connection(record.sprite_name, connection_spec)
+        store.record_connection_verification(
+            tenant_id, req.id, result, actor_type="admin_api"
+        )
     except TenantStoreError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    return {"tenant_id": tenant_id, "connection": req.id, "provider": req.provider}
+    except Exception as e:
+        result = {
+            "status": "failed",
+            "error": {"kind": "probe_failed", "detail": str(e)},
+        }
+        store.record_connection_verification(
+            tenant_id, req.id, result, actor_type="admin_api"
+        )
+        raise HTTPException(status_code=502, detail=result["error"]) from e
+    if result.get("status") != "verified":
+        raise HTTPException(status_code=502, detail=result.get("error"))
+    return {
+        "tenant_id": tenant_id,
+        "connection": req.id,
+        "provider": req.provider,
+        "status": "verified",
+        "publication": {
+            "id": result.get("publication_id"),
+            "name": result.get("publication_name"),
+        },
+    }
 
 
 @app.get("/v1/tenants/{tenant_id}/status")
@@ -167,7 +219,12 @@ def tenant_status(tenant_id: str, authorization: str | None = Header(default=Non
         "sprite_name": record.sprite_name,
         "workers": record.config.get("workers", []),
         "connections": [
-            {"id": c.get("id"), "provider": c.get("provider")}
+            {
+                "id": c.get("id"),
+                "provider": c.get("provider"),
+                "status": c.get("status"),
+                "last_verified_at": c.get("last_verified_at"),
+            }
             for c in record.config.get("connections", [])
         ],
     }

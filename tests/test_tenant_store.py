@@ -63,13 +63,26 @@ def test_config_updates_and_audit_are_store_owned(tmp_path: Path):
             "id": "bee-main",
             "provider": "beehiiv",
             "settings": {
-                "gateway_base_url": "https://connector.example.test",
+                "gateway_base_url": "https://api.sprites.dev/v1/gateway/custom_api/bee-main",
                 "publication_id": "pub_example",
             },
         },
         actor_type="admin_api",
     )
     assert record.config["connections"][0]["id"] == "bee-main"
+
+    record = store.record_connection_verification(
+        "acme",
+        "bee-main",
+        {
+            "status": "verified",
+            "checked_at": "2026-09-06T00:00:00+00:00",
+            "publication_id": "pub_example",
+            "publication_name": "Example newsletter",
+        },
+    )
+    assert record.config["connections"][0]["status"] == "verified"
+    assert record.config["connections"][0]["last_error"] is None
 
     store.set_sprite("acme", "harbor-acme-example")
     assert store.get("acme").sprite_name == "harbor-acme-example"
@@ -78,6 +91,7 @@ def test_config_updates_and_audit_are_store_owned(tmp_path: Path):
     assert {
         "tenant.created",
         "connection.upserted",
+        "connection.verified",
         "tenant.sprite.assigned",
     } <= actions
 

@@ -43,13 +43,27 @@ def test_connection_endpoint_persists_only_non_secret_metadata(tmp_path, monkeyp
     monkeypatch.setenv("HARBOR_ADMIN_TOKEN", "local-admin-test-token")
     control_plane._admin("Bearer local-admin-test-token")
 
+    class VerifiedRunner:
+        def verify_connection(self, sprite_name, connection_spec):
+            assert sprite_name == "harbor-acme"
+            assert connection_spec["provider"] == "beehiiv"
+            return {
+                "status": "verified",
+                "provider": "beehiiv",
+                "checked_at": "2026-09-06T00:00:00+00:00",
+                "publication_id": "pub_example",
+                "publication_name": "Example newsletter",
+            }
+
+    monkeypatch.setattr(control_plane, "SpriteRunner", VerifiedRunner)
+
     with pytest.raises(HTTPException) as rejected:
         control_plane.attach_connection(
             "acme",
             control_plane.ConnectionAttach(
                 provider="beehiiv",
                 id="bee-main",
-                gateway_base_url="https://connector.example.test",
+                gateway_base_url="https://api.sprites.dev/v1/gateway/custom_api/bee-main",
                 settings={"api_key": "never-store-this"},
             ),
         )
@@ -60,7 +74,7 @@ def test_connection_endpoint_persists_only_non_secret_metadata(tmp_path, monkeyp
         control_plane.ConnectionAttach(
             provider="beehiiv",
             id="bee-main",
-            gateway_base_url="https://connector.example.test",
+            gateway_base_url="https://api.sprites.dev/v1/gateway/custom_api/bee-main",
             settings={"publication_id": "pub_example"},
         ),
     )
@@ -68,6 +82,57 @@ def test_connection_endpoint_persists_only_non_secret_metadata(tmp_path, monkeyp
     connection = store.get("acme").config["connections"][0]
     assert connection["settings"]["publication_id"] == "pub_example"
     assert "api_key" not in connection["settings"]
+    assert connection["status"] == "verified"
+    assert connection["sync"]["publication_name"] == "Example newsletter"
+
+
+def test_connection_failure_is_persisted_and_visible(tmp_path, monkeypatch):
+    store, _ = _tenant_store(tmp_path)
+    monkeypatch.setattr(control_plane, "store", store)
+
+    class FailedRunner:
+        def verify_connection(self, sprite_name, connection_spec):
+            return {
+                "status": "failed",
+                "provider": "beehiiv",
+                "checked_at": "2026-09-06T00:00:00+00:00",
+                "error": {"kind": "beehiiv_http_error", "detail": "401 unauthorized"},
+            }
+
+    monkeypatch.setattr(control_plane, "SpriteRunner", FailedRunner)
+    with pytest.raises(HTTPException) as error:
+        control_plane.attach_connection(
+            "acme",
+            control_plane.ConnectionAttach(
+                provider="beehiiv",
+                id="bee-main",
+                gateway_base_url="https://api.sprites.dev/v1/gateway/custom_api/bee-main",
+                settings={"publication_id": "pub_example"},
+            ),
+        )
+
+    assert error.value.status_code == 502
+    connection = store.get("acme").config["connections"][0]
+    assert connection["status"] == "failed"
+    assert connection["last_error"]["kind"] == "beehiiv_http_error"
+    actions = {event.action for event in store.list_audit("acme")}
+    assert "connection.failed" in actions
+
+
+def test_connection_endpoint_rejects_non_sprite_gateway(tmp_path, monkeypatch):
+    store, _ = _tenant_store(tmp_path)
+    monkeypatch.setattr(control_plane, "store", store)
+    with pytest.raises(HTTPException) as error:
+        control_plane.attach_connection(
+            "acme",
+            control_plane.ConnectionAttach(
+                provider="beehiiv",
+                id="bee-main",
+                gateway_base_url="https://attacker.example/bee-main",
+                settings={"publication_id": "pub_example"},
+            ),
+        )
+    assert error.value.status_code == 422
 
 
 def test_remote_run_uses_internal_identity_and_surfaces_worker_failure(

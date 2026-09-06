@@ -39,7 +39,9 @@ def _get(path, params=None, *, api_key: str | None, base_url: str = BEEHIIV_BASE
         with urllib.request.urlopen(req, timeout=60) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
-        raise BeehiivError("beehiiv_http_error", f"{e.code} {e.read()[:300]!r}")
+        raise BeehiivError(
+            "beehiiv_http_error", f"provider returned HTTP {e.code}"
+        ) from e
     except (urllib.error.URLError, TimeoutError) as e:
         raise BeehiivError("beehiiv_unreachable", str(e))
 
@@ -94,6 +96,34 @@ def publication_performance(
         "avg_open_rate": stats.get("average_open_rate"),
         "avg_click_rate": stats.get("average_click_rate"),
         "recent_posts": post_rows,
+    }
+
+
+def verify_publication(
+    pub_id: str,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    auth_mode: str = "bearer",
+) -> dict:
+    """Verify read access and return only safe connection metadata."""
+    api_key = api_key or os.environ.get("BEEHIIV_API_KEY")
+    base_url = base_url or BEEHIIV_BASE
+    if auth_mode == "bearer" and not api_key:
+        raise BeehiivError(
+            "missing_credential", "No live beehiiv credential was provided."
+        )
+    response = _get(
+        f"/publications/{pub_id}",
+        api_key=api_key,
+        base_url=base_url,
+        auth_mode=auth_mode,
+    )
+    publication = response.get("data", response)
+    return {
+        "publication_id": publication.get("id") or pub_id,
+        "publication_name": publication.get("name"),
+        "organization_name": publication.get("organization_name"),
     }
 
 
