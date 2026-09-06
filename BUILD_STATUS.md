@@ -75,13 +75,29 @@
   and idempotent worker execution. Its schemas expose no tenant-config or
   filesystem-path parameter.
 
-## Still required for first delivered pilot
+## Live email and tenant-isolation evidence completed
 
-- Configure and verify a real email provider account, sending identity, and
-  recipient; the adapter is deployed but intentionally not enabled without
-  those external items.
+- A real Resend account is configured through Fly secrets, and a completed live
+  beehiiv report was delivered and visibly rendered in the pilot inbox.
+- The delivery receipt, attempt count, and completed run are durable Postgres
+  state; the provider secret is absent from tenant state, run state, and the
+  Sprite report.
+- A second tenant was created through the same API and Harbor automatically
+  provisioned a distinct persistent Sprite with the current runtime.
+- Cross-tenant HTTP authentication returned 401 in both directions, and the
+  remote MCP surface resolved the second tenant only from its own bearer key.
+- The two tenants exposed disjoint run histories and workspace files.
+- The pilot Sprite received HTTP 200 through its beehiiv connector while the
+  second tenant Sprite received HTTP 403 for that same connector gateway,
+  proving the live Fly Connector policy boundary.
+
+## Still required before commercial launch
+
+- Verify a custom email-sending domain before delivering to addresses other
+  than the Resend account owner. The current testing sender is intentionally
+  limited to the verified account address.
 - Monitoring/alerts around the implemented retry policy.
-- second-tenant isolation test.
+- Minimum end-user web onboarding and connector setup UX.
 - OAuth-based end-user onboarding for ChatGPT; direct bearer-authenticated MCP
   is available to clients that support custom authorization headers.
 

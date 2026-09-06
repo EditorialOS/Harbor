@@ -145,12 +145,14 @@ schedule state. The scheduler derives one stable idempotency key per local-date
 window, uses bounded retries, and advances directly to the next future window
 after downtime.
 
-## 10. What remains before paid pilot
+## 10. What remains before broader customer use
 
-- a verified email-provider account and sender identity;
+- a custom verified email-sending domain for recipients beyond the provider
+  account owner;
 - monitoring/alerts;
 - connector onboarding UX;
-- second-tenant isolation test.
+- end-user account/session onboarding;
+- OAuth onboarding for ChatGPT clients that cannot supply custom headers.
 
 ## Email output
 
@@ -171,6 +173,10 @@ curl -X PUT "https://$HARBOR_FLY_APP.fly.dev/v1/tenants/pilot/outputs/email" \
 The next completed worker run reads only its fixed Sprite report path, sends
 both HTML and text, and persists a delivery record. Retries reuse the same
 provider idempotency key.
+
+For an initial operator-only test without a custom domain, Resend's testing
+sender can deliver only to the email address registered to that Resend account.
+Do not represent that restricted sender as general customer email delivery.
 
 ## Remote MCP
 
