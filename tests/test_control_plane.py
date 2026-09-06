@@ -206,9 +206,7 @@ def test_schedule_change_preserves_latest_scheduled_run_history(tmp_path, monkey
     store, key = _tenant_store(tmp_path)
     monkeypatch.setattr(control_plane, "store", store)
     window = "schedule-v1:2026-09-06:0600:UTC"
-    assert store.claim_run(
-        "run_scheduled", "acme", "newsletter-intelligence", window
-    )
+    assert store.claim_run("run_scheduled", "acme", "newsletter-intelligence", window)
     store.begin_run_attempt("run_scheduled")
     store.finish_run("run_scheduled", "completed", {"status": "completed"})
 
@@ -247,9 +245,7 @@ def test_tenant_creation_rejects_invalid_schedule_before_persisting(
         store.get("invalid")
 
 
-def test_tenant_can_configure_email_without_provider_credentials(
-    tmp_path, monkeypatch
-):
+def test_tenant_can_configure_email_without_provider_credentials(tmp_path, monkeypatch):
     store, key = _tenant_store(tmp_path)
     monkeypatch.setattr(control_plane, "store", store)
 
@@ -271,3 +267,19 @@ def test_tenant_can_configure_email_without_provider_credentials(
         control_plane.EmailOutputUpdate.model_validate(
             {"recipients": ["owner@example.com"], "api_key": "never-accepted"}
         )
+
+
+def test_readiness_and_metrics_use_durable_aggregate_state(tmp_path, monkeypatch):
+    store, _ = _tenant_store(tmp_path)
+    store.upsert_service_heartbeat("scheduler", "healthy", {"event_count": 0})
+    monkeypatch.setattr(control_plane, "store", store)
+
+    readiness = control_plane.readyz()
+    rendered = control_plane.metrics()
+
+    assert readiness["ok"] is True
+    assert readiness["database_schema_version"] == store.schema_version
+    assert "harbor_metrics_up 1" in rendered
+    assert "harbor_tenants_active 1" in rendered
+    assert 'harbor_scheduler_heartbeat{status="healthy"} 1' in rendered
+    assert "acme" not in rendered

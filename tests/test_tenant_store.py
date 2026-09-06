@@ -1,3 +1,4 @@
+import datetime as dt
 import sqlite3
 from pathlib import Path
 
@@ -173,6 +174,70 @@ def test_email_configuration_and_delivery_state_are_store_owned(tmp_path: Path):
         "delivery.claimed",
         "delivery.finished",
     }
+
+
+def test_service_heartbeat_and_operational_snapshot_are_durable(tmp_path: Path):
+    store = TenantStore(f"sqlite:///{tmp_path / 'operations.db'}")
+    _create(store)
+    heartbeat = store.upsert_service_heartbeat(
+        "scheduler", "healthy", {"event_count": 2}
+    )
+    assert heartbeat.status == "healthy"
+    assert heartbeat.metadata == {"event_count": 2}
+    assert store.get_service_heartbeat("scheduler") == heartbeat
+
+    store.upsert_schedule_state(
+        "acme",
+        "newsletter-intelligence",
+        next_run_at="2020-01-01T00:00:00+00:00",
+        last_status="scheduled",
+    )
+    assert store.claim_run(
+        "stale-run",
+        "acme",
+        "newsletter-intelligence",
+        "stale-window",
+        lease_seconds=60,
+    )
+    snapshot = store.operational_snapshot(
+        dt.datetime(2030, 1, 1, tzinfo=dt.timezone.utc)
+    )
+
+    assert snapshot["schema_version"] == LATEST_SCHEMA_VERSION
+    assert snapshot["active_tenants"] == 1
+    assert snapshot["runs"] == {"running": 1}
+    assert snapshot["overdue_schedules"] == 1
+    assert snapshot["expired_run_leases"] == 1
+    assert snapshot["scheduler_heartbeat_status"] == "healthy"
+    assert snapshot["scheduler_heartbeat_age_seconds"] is not None
+
+
+def test_service_heartbeat_rejects_secret_metadata(tmp_path: Path):
+    store = TenantStore(f"sqlite:///{tmp_path / 'heartbeat-secrets.db'}")
+    with pytest.raises(TenantStoreError, match="plaintext secret-like field"):
+        store.upsert_service_heartbeat(
+            "scheduler", "failed", {"api_key": "must-not-be-stored"}
+        )
+
+
+def test_operational_snapshot_applies_schedule_overdue_grace(tmp_path: Path):
+    store = TenantStore(f"sqlite:///{tmp_path / 'grace.db'}")
+    _create(store)
+    store.upsert_schedule_state(
+        "acme",
+        "newsletter-intelligence",
+        next_run_at="2026-09-06T12:59:00+00:00",
+        last_status="scheduled",
+    )
+
+    now = dt.datetime(2026, 9, 6, 13, 0, tzinfo=dt.timezone.utc)
+    assert store.operational_snapshot(now)["overdue_schedules"] == 0
+    assert (
+        store.operational_snapshot(now, overdue_grace_seconds=0)[
+            "overdue_schedules"
+        ]
+        == 1
+    )
 
 
 def test_secret_shaped_connection_metadata_is_rejected(tmp_path: Path):

@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException
+    from fastapi.responses import PlainTextResponse
     from pydantic import BaseModel, ConfigDict, Field
 except ImportError as e:  # pragma: no cover
     raise RuntimeError(
@@ -30,6 +31,7 @@ from .remote_mcp import create_remote_mcp
 from .scheduler import DailySchedule, next_occurrence, parse_daily_schedule
 from .sprite_runner import SpriteRunner
 from .tenant_store import (
+    LATEST_SCHEMA_VERSION,
     TenantStore,
     TenantStoreError,
     validate_non_secret_metadata,
@@ -45,9 +47,7 @@ async def _lifespan(_app: FastAPI):
         yield
 
 
-app = FastAPI(
-    title="Harbor Control Plane", version="0.9.0-alpha", lifespan=_lifespan
-)
+app = FastAPI(title="Harbor Control Plane", version="0.9.0-alpha", lifespan=_lifespan)
 app.mount("/mcp", remote_mcp.app)
 
 
@@ -122,6 +122,70 @@ class EmailOutputUpdate(BaseModel):
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "service": "harbor-control-plane"}
+
+
+@app.get("/readyz")
+def readyz():
+    try:
+        version = store.schema_version
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="database unavailable") from error
+    if version != LATEST_SCHEMA_VERSION:
+        raise HTTPException(status_code=503, detail="database schema is not current")
+    return {
+        "ok": True,
+        "service": "harbor-control-plane",
+        "database_schema_version": version,
+    }
+
+
+def _prometheus_label(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+@app.get("/metrics", response_class=PlainTextResponse, include_in_schema=False)
+def metrics():
+    try:
+        snapshot = store.operational_snapshot()
+    except Exception:
+        return PlainTextResponse(
+            "# TYPE harbor_metrics_up gauge\nharbor_metrics_up 0\n",
+            status_code=503,
+        )
+    lines = [
+        "# TYPE harbor_metrics_up gauge",
+        "harbor_metrics_up 1",
+        "# TYPE harbor_database_schema_version gauge",
+        f"harbor_database_schema_version {snapshot['schema_version']}",
+        "# TYPE harbor_tenants_active gauge",
+        f"harbor_tenants_active {snapshot['active_tenants']}",
+        "# TYPE harbor_runs gauge",
+    ]
+    for status, count in sorted(snapshot["runs"].items()):
+        lines.append(f'harbor_runs{{status="{_prometheus_label(status)}"}} {count}')
+    lines.append("# TYPE harbor_deliveries gauge")
+    for status, count in sorted(snapshot["deliveries"].items()):
+        lines.append(
+            f'harbor_deliveries{{status="{_prometheus_label(status)}"}} {count}'
+        )
+    heartbeat_status = _prometheus_label(snapshot["scheduler_heartbeat_status"])
+    lines.extend(
+        [
+            "# TYPE harbor_schedule_overdue gauge",
+            f"harbor_schedule_overdue {snapshot['overdue_schedules']}",
+            "# TYPE harbor_run_leases_expired gauge",
+            f"harbor_run_leases_expired {snapshot['expired_run_leases']}",
+            "# TYPE harbor_scheduler_heartbeat gauge",
+            f'harbor_scheduler_heartbeat{{status="{heartbeat_status}"}} 1',
+            "# TYPE harbor_scheduler_heartbeat_age_seconds gauge",
+        ]
+    )
+    heartbeat_age = snapshot["scheduler_heartbeat_age_seconds"]
+    lines.append(
+        "harbor_scheduler_heartbeat_age_seconds "
+        + (str(heartbeat_age) if heartbeat_age is not None else "-1")
+    )
+    return "\n".join(lines) + "\n"
 
 
 @app.post("/v1/tenants", dependencies=[Depends(_admin)])
@@ -280,9 +344,9 @@ def tenant_status(tenant_id: str, authorization: str | None = Header(default=Non
                 (record.config.get("output_settings") or {}).get("email")
             ),
             "recipient_count": len(
-                (
-                    (record.config.get("output_settings") or {}).get("email") or {}
-                ).get("recipients", [])
+                ((record.config.get("output_settings") or {}).get("email") or {}).get(
+                    "recipients", []
+                )
             ),
         },
         "connections": [

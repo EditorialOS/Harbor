@@ -1,6 +1,14 @@
 import datetime as dt
 
-from harbor.scheduler import DailySchedule, Scheduler, next_occurrence, window_key
+import pytest
+
+from harbor.scheduler import (
+    DailySchedule,
+    Scheduler,
+    monitored_tick,
+    next_occurrence,
+    window_key,
+)
 from harbor.tenant_store import TenantStore
 
 
@@ -79,9 +87,7 @@ def test_scheduler_skips_backlog_after_a_long_outage(tmp_path):
         last_status="scheduled",
     )
 
-    events = scheduler.tick(
-        dt.datetime(2026, 9, 5, 20, 0, tzinfo=dt.timezone.utc)
-    )
+    events = scheduler.tick(dt.datetime(2026, 9, 5, 20, 0, tzinfo=dt.timezone.utc))
 
     assert events[0]["status"] == "completed"
     assert len(runner.calls) == 1
@@ -135,9 +141,7 @@ def test_missing_sprite_failure_is_persisted_without_crashing_tick(tmp_path):
         last_status="scheduled",
     )
 
-    events = scheduler.tick(
-        dt.datetime(2026, 9, 5, 6, 31, tzinfo=dt.timezone.utc)
-    )
+    events = scheduler.tick(dt.datetime(2026, 9, 5, 6, 31, tzinfo=dt.timezone.utc))
 
     assert events[0]["status"] == "failed"
     assert events[0]["run_id"] is None
@@ -145,3 +149,25 @@ def test_missing_sprite_failure_is_persisted_without_crashing_tick(tmp_path):
     assert state is not None
     assert state.last_status == "failed"
     assert "not provisioned" in (state.last_error or "")
+
+
+def test_monitored_tick_records_healthy_and_failed_heartbeats(tmp_path):
+    store = _scheduled_store(tmp_path)
+    scheduler = Scheduler(store, SuccessfulRunner(), sleeper=lambda _: None)
+
+    assert monitored_tick(scheduler, store)[0]["status"] == "scheduled"
+    heartbeat = store.get_service_heartbeat("scheduler")
+    assert heartbeat is not None
+    assert heartbeat.status == "healthy"
+    assert heartbeat.metadata == {"event_count": 1}
+
+    class BrokenScheduler:
+        def tick(self):
+            raise RuntimeError("scheduler failed")
+
+    with pytest.raises(RuntimeError, match="scheduler failed"):
+        monitored_tick(BrokenScheduler(), store)
+    heartbeat = store.get_service_heartbeat("scheduler")
+    assert heartbeat is not None
+    assert heartbeat.status == "failed"
+    assert heartbeat.metadata == {"error_type": "RuntimeError"}

@@ -30,5 +30,10 @@
   grace_period = "10s"
   interval = "30s"
   method = "GET"
-  path = "/healthz"
+  path = "/readyz"
   timeout = "5s"
+
+[[metrics]]
+  port = 8080
+  path = "/metrics"
+  processes = ["app"]

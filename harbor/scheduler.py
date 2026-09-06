@@ -264,6 +264,27 @@ class Scheduler:
         return events
 
 
+def monitored_tick(scheduler: Scheduler, store: TenantStore) -> list[dict[str, Any]]:
+    store.upsert_service_heartbeat("scheduler", "running", {"phase": "tick"})
+    try:
+        events = scheduler.tick()
+    except Exception as error:
+        try:
+            store.upsert_service_heartbeat(
+                "scheduler",
+                "failed",
+                {"error_type": type(error).__name__},
+            )
+        finally:
+            raise
+    store.upsert_service_heartbeat(
+        "scheduler",
+        "healthy",
+        {"event_count": len(events)},
+    )
+    return events
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
@@ -283,7 +304,7 @@ def main() -> None:
         run_lease_seconds=run_lease_seconds,
     )
     while True:
-        for event in scheduler.tick():
+        for event in monitored_tick(scheduler, store):
             print(json.dumps(event), flush=True)
         if args.once:
             return

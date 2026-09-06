@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 from dataclasses import dataclass
@@ -90,7 +91,15 @@ class DeliveryRecord:
     delivered_at: str | None
 
 
-LATEST_SCHEMA_VERSION = 7
+@dataclass(frozen=True)
+class ServiceHeartbeat:
+    service_id: str
+    status: str
+    metadata: dict[str, Any]
+    updated_at: str
+
+
+LATEST_SCHEMA_VERSION = 8
 
 _SCHEMA_MIGRATIONS_SQLITE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -230,6 +239,18 @@ _SQLITE_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS tenants_api_key_hash_idx ON tenants (api_key_hash)",
         ),
     ),
+    (
+        8,
+        "service_heartbeats",
+        (
+            """CREATE TABLE IF NOT EXISTS service_heartbeats (
+                service_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )""",
+        ),
+    ),
 )
 
 _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
@@ -345,6 +366,18 @@ _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
         "indexed_tenant_api_key_hashes",
         (
             "CREATE INDEX IF NOT EXISTS tenants_api_key_hash_idx ON tenants (api_key_hash)",
+        ),
+    ),
+    (
+        8,
+        "service_heartbeats",
+        (
+            """CREATE TABLE IF NOT EXISTS service_heartbeats (
+                service_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                metadata_json JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            )""",
         ),
     ),
 )
@@ -1401,6 +1434,158 @@ class TenantStore:
             raise TenantStoreError("schedule state was not persisted")
         return state
 
+    def upsert_service_heartbeat(
+        self,
+        service_id: str,
+        status: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> ServiceHeartbeat:
+        if not re.fullmatch(r"[a-z][a-z0-9._-]{0,63}", service_id):
+            raise TenantStoreError("service heartbeat id is invalid")
+        if status not in {"starting", "running", "healthy", "degraded", "failed"}:
+            raise TenantStoreError("service heartbeat status is invalid")
+        metadata = metadata or {}
+        validate_non_secret_metadata(metadata, "service_heartbeat.metadata")
+        now = _utcnow()
+        payload = json.dumps(metadata)
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                conn.execute(
+                    """INSERT INTO service_heartbeats
+                       (service_id,status,metadata_json,updated_at) VALUES (?,?,?,?)
+                       ON CONFLICT(service_id) DO UPDATE SET
+                         status=excluded.status,
+                         metadata_json=excluded.metadata_json,
+                         updated_at=excluded.updated_at""",
+                    (service_id, status, payload, now),
+                )
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO service_heartbeats
+                           (service_id,status,metadata_json,updated_at)
+                           VALUES (%s,%s,%s::jsonb,%s)
+                           ON CONFLICT(service_id) DO UPDATE SET
+                             status=EXCLUDED.status,
+                             metadata_json=EXCLUDED.metadata_json,
+                             updated_at=EXCLUDED.updated_at""",
+                        (service_id, status, payload, now),
+                    )
+        heartbeat = self.get_service_heartbeat(service_id)
+        if heartbeat is None:  # pragma: no cover - defensive after successful upsert
+            raise TenantStoreError("service heartbeat was not persisted")
+        return heartbeat
+
+    def get_service_heartbeat(self, service_id: str) -> ServiceHeartbeat | None:
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        sql = (
+            "SELECT service_id,status,metadata_json,updated_at "
+            f"FROM service_heartbeats WHERE service_id={placeholder}"
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                row = conn.execute(sql, (service_id,)).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (service_id,))
+                    row = cur.fetchone()
+        if not row:
+            return None
+        metadata = json.loads(row[2]) if isinstance(row[2], str) else dict(row[2])
+        return ServiceHeartbeat(
+            service_id=row[0],
+            status=row[1],
+            metadata=metadata,
+            updated_at=_time_text(row[3]) or "",
+        )
+
+    def operational_snapshot(
+        self,
+        now: dt.datetime | None = None,
+        *,
+        overdue_grace_seconds: int = 900,
+    ) -> dict[str, Any]:
+        """Return aggregate, non-tenant-identifying state for health metrics."""
+        now = now or dt.datetime.now(dt.timezone.utc)
+        if now.tzinfo is None:
+            raise TenantStoreError("operational snapshot time must be timezone-aware")
+        if overdue_grace_seconds < 0 or overdue_grace_seconds > 86_400:
+            raise TenantStoreError("operational snapshot grace period is invalid")
+        now = now.astimezone(dt.timezone.utc)
+        overdue_before = now - dt.timedelta(seconds=overdue_grace_seconds)
+        active_predicate = "active=1" if self.kind == "sqlite" else "active=TRUE"
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                active_tenants = int(
+                    conn.execute(
+                        f"SELECT COUNT(*) FROM tenants WHERE {active_predicate}"
+                    ).fetchone()[0]
+                )
+                run_rows = conn.execute(
+                    "SELECT status,COUNT(*) FROM runs GROUP BY status"
+                ).fetchall()
+                delivery_rows = conn.execute(
+                    "SELECT status,COUNT(*) FROM deliveries GROUP BY status"
+                ).fetchall()
+                schedule_rows = conn.execute(
+                    "SELECT next_run_at,last_status FROM schedule_state"
+                ).fetchall()
+                lease_rows = conn.execute(
+                    "SELECT lease_expires_at FROM runs WHERE status='running'"
+                ).fetchall()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT COUNT(*) FROM tenants WHERE {active_predicate}"
+                    )
+                    active_tenants = int(cur.fetchone()[0])
+                    cur.execute("SELECT status,COUNT(*) FROM runs GROUP BY status")
+                    run_rows = cur.fetchall()
+                    cur.execute(
+                        "SELECT status,COUNT(*) FROM deliveries GROUP BY status"
+                    )
+                    delivery_rows = cur.fetchall()
+                    cur.execute("SELECT next_run_at,last_status FROM schedule_state")
+                    schedule_rows = cur.fetchall()
+                    cur.execute(
+                        "SELECT lease_expires_at FROM runs WHERE status='running'"
+                    )
+                    lease_rows = cur.fetchall()
+
+        def parsed(value: Any) -> dt.datetime:
+            result = dt.datetime.fromisoformat(_time_text(value) or "")
+            if result.tzinfo is None:
+                result = result.replace(tzinfo=dt.timezone.utc)
+            return result.astimezone(dt.timezone.utc)
+
+        overdue_schedules = sum(
+            1
+            for next_run_at, last_status in schedule_rows
+            if last_status not in {"running"}
+            and parsed(next_run_at) < overdue_before
+        )
+        expired_run_leases = sum(
+            1
+            for (lease_expires_at,) in lease_rows
+            if lease_expires_at is not None and parsed(lease_expires_at) < now
+        )
+        heartbeat = self.get_service_heartbeat("scheduler")
+        heartbeat_age = None
+        if heartbeat is not None:
+            heartbeat_age = max(
+                0.0, (now - parsed(heartbeat.updated_at)).total_seconds()
+            )
+        return {
+            "schema_version": self.schema_version,
+            "active_tenants": active_tenants,
+            "runs": {str(row[0]): int(row[1]) for row in run_rows},
+            "deliveries": {str(row[0]): int(row[1]) for row in delivery_rows},
+            "overdue_schedules": overdue_schedules,
+            "expired_run_leases": expired_run_leases,
+            "scheduler_heartbeat_status": heartbeat.status if heartbeat else "missing",
+            "scheduler_heartbeat_age_seconds": heartbeat_age,
+        }
+
     def claim_delivery(
         self,
         delivery_id: str,
@@ -1451,8 +1636,9 @@ class TenantStore:
                 )
             return True
         except sqlite3.IntegrityError as error:
-            if "deliveries.tenant_id, deliveries.adapter, deliveries.idempotency_key" in str(
-                error
+            if (
+                "deliveries.tenant_id, deliveries.adapter, deliveries.idempotency_key"
+                in str(error)
             ):
                 return False
             raise TenantStoreError(
@@ -1575,7 +1761,14 @@ class TenantStore:
             raise TenantStoreError("provider message id is too long")
         now = _utcnow()
         delivered_at = now if status == "delivered" else None
-        values = (status, provider_message_id, last_error, now, delivered_at, delivery_id)
+        values = (
+            status,
+            provider_message_id,
+            last_error,
+            now,
+            delivered_at,
+            delivery_id,
+        )
         with self._connect() as conn:
             if self.kind == "sqlite":
                 cur = conn.execute(
