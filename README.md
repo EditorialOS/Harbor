@@ -44,4 +44,4 @@ Postgres state, tenant Sprite, restricted beehiiv connector, and unattended
 scheduled execution. A real report has also been delivered through the email
 adapter, and a second live tenant has proven API, MCP, run, file, Sprite, and
 connector-policy isolation. It is not beta or production-ready: a custom sender
-domain, monitoring, web onboarding, and ChatGPT OAuth onboarding remain gates.
+domain, alert routing, web onboarding, and ChatGPT OAuth onboarding remain gates.

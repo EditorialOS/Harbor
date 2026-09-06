@@ -9,9 +9,19 @@ identifiers, recipient addresses, or customer report content.
 - Harbor control-plane app: `harbor-roger-280`
 - Pilot Sprite: `harbor-pilot-07ae38b9`
 - Control-plane health: passing
-- Postgres schema version: 7
+- Postgres schema version: 8
 - Sprite runtime install, checkpoint, cold wake, persistent probe, and live
   worker reconciliation: passed using `docs/SPRITES_LIVE_VERIFICATION.md`
+
+## Operational health
+
+- Fly HTTP health check uses database-aware `/readyz`: passing
+- Fly Prometheus scrape endpoint: live
+- Scheduler durable heartbeat: healthy
+- Overdue schedule count at verification: zero
+- Expired run lease count at verification: zero
+- Metrics expose aggregate counts without tenant identifiers: passed
+- External alert destination and alert rules: not yet configured
 
 ## Scheduled and delivered live job
 

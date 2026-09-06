@@ -96,7 +96,10 @@
 - Verify a custom email-sending domain before delivering to addresses other
   than the Resend account owner. The current testing sender is intentionally
   limited to the verified account address.
-- Monitoring/alerts around the implemented retry policy.
+- Configure an external alert destination and alert rules for Harbor's live
+  Prometheus metrics. Database-aware readiness, aggregate run/delivery counts,
+  overdue schedules, expired leases, and the durable scheduler heartbeat are
+  implemented and live.
 - Minimum end-user web onboarding and connector setup UX.
 - OAuth-based end-user onboarding for ChatGPT; direct bearer-authenticated MCP
   is available to clients that support custom authorization headers.

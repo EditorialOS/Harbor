@@ -61,8 +61,14 @@ fly deploy -a "$HARBOR_FLY_APP"
 Verify:
 
 ```bash
-curl "https://$HARBOR_FLY_APP.fly.dev/healthz"
+curl "https://$HARBOR_FLY_APP.fly.dev/readyz"
+curl "https://$HARBOR_FLY_APP.fly.dev/metrics"
 ```
+
+`/readyz` fails when Postgres is unavailable or its schema is not current. Fly
+scrapes `/metrics` for aggregate control-plane and scheduler health. The metrics
+contain no tenant identifiers. Configure alert rules and an external contact
+point separately; metrics collection alone does not notify an operator.
 
 ## 5. Create pilot tenant
 
@@ -149,7 +155,7 @@ after downtime.
 
 - a custom verified email-sending domain for recipients beyond the provider
   account owner;
-- monitoring/alerts;
+- alert rules and an external alert destination for the implemented metrics;
 - connector onboarding UX;
 - end-user account/session onboarding;
 - OAuth onboarding for ChatGPT clients that cannot supply custom headers.
