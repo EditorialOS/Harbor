@@ -7,6 +7,7 @@ at run time; provider credentials live in Fly Sprites Connectors.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import os
 import re
@@ -22,6 +23,8 @@ except ImportError as e:  # pragma: no cover
         "Install Harbor's production dependencies to run the control plane"
     ) from e
 
+from .dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
+from .scheduler import DailySchedule, next_occurrence, parse_daily_schedule
 from .sprite_runner import SpriteRunner
 from .tenant_store import (
     TenantStore,
@@ -87,6 +90,12 @@ class RunRequest(BaseModel):
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=255)
 
 
+class ScheduleUpdate(BaseModel):
+    hour: int = Field(ge=0, le=23)
+    minute: int = Field(default=0, ge=0, le=59)
+    timezone: str | None = Field(default=None, min_length=1, max_length=128)
+
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "service": "harbor-control-plane"}
@@ -94,6 +103,19 @@ def healthz():
 
 @app.post("/v1/tenants", dependencies=[Depends(_admin)])
 def create_tenant(req: TenantCreate):
+    try:
+        for worker_id, raw_schedule in req.schedule.items():
+            if worker_id not in req.workers:
+                raise ValueError(
+                    f"scheduled worker '{worker_id}' is not enabled for this tenant"
+                )
+            next_occurrence(
+                dt.datetime.now(dt.timezone.utc),
+                req.timezone,
+                parse_daily_schedule(raw_schedule),
+            )
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     config = {
         "workers": req.workers,
         "schedule": req.schedule,
@@ -140,9 +162,7 @@ def attach_connection(tenant_id: str, req: ConnectionAttach):
         raise HTTPException(
             status_code=422, detail="gateway_base_url must not contain credentials"
         )
-    expected_path = re.compile(
-        rf"^/v1/gateway/[a-z0-9_-]+/{re.escape(req.id)}/?$"
-    )
+    expected_path = re.compile(rf"^/v1/gateway/[a-z0-9_-]+/{re.escape(req.id)}/?$")
     if (
         parsed_gateway.hostname != "api.sprites.dev"
         or parsed_gateway.query
@@ -164,9 +184,7 @@ def attach_connection(tenant_id: str, req: ConnectionAttach):
         },
     }
     try:
-        record = store.upsert_connection(
-            tenant_id, connection, actor_type="admin_api"
-        )
+        record = store.upsert_connection(tenant_id, connection, actor_type="admin_api")
         if not record.sprite_name:
             raise TenantStoreError("tenant Sprite is not provisioned")
         connection_spec = {
@@ -212,12 +230,27 @@ def attach_connection(tenant_id: str, req: ConnectionAttach):
 def tenant_status(tenant_id: str, authorization: str | None = Header(default=None)):
     _tenant_auth(tenant_id, authorization)
     record = store.get(tenant_id)
+    schedule_state = {
+        worker_id: store.get_schedule_state(tenant_id, worker_id)
+        for worker_id in record.config.get("schedule", {})
+    }
     return {
         "tenant_id": record.tenant_id,
         "name": record.name,
         "timezone": record.timezone,
         "sprite_name": record.sprite_name,
         "workers": record.config.get("workers", []),
+        "schedule": record.config.get("schedule", {}),
+        "schedule_state": {
+            worker_id: {
+                "next_run_at": state.next_run_at,
+                "last_run_id": state.last_run_id,
+                "last_status": state.last_status,
+                "attempt_count": state.attempt_count,
+            }
+            for worker_id, state in schedule_state.items()
+            if state is not None
+        },
         "connections": [
             {
                 "id": c.get("id"),
@@ -227,6 +260,42 @@ def tenant_status(tenant_id: str, authorization: str | None = Header(default=Non
             }
             for c in record.config.get("connections", [])
         ],
+    }
+
+
+@app.put("/v1/tenants/{tenant_id}/workers/{worker_id}/schedule")
+def update_worker_schedule(
+    tenant_id: str,
+    worker_id: str,
+    req: ScheduleUpdate,
+    authorization: str | None = Header(default=None),
+):
+    _tenant_auth(tenant_id, authorization)
+    record = store.get(tenant_id)
+    timezone = req.timezone or record.timezone
+    schedule = DailySchedule(req.hour, req.minute)
+    try:
+        next_at = next_occurrence(dt.datetime.now(dt.timezone.utc), timezone, schedule)
+        store.update_worker_schedule(
+            tenant_id,
+            worker_id,
+            {"hour": req.hour, "minute": req.minute},
+            timezone,
+        )
+        store.upsert_schedule_state(
+            tenant_id,
+            worker_id,
+            next_run_at=next_at.isoformat(),
+            last_status="scheduled",
+        )
+    except (TenantStoreError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {
+        "tenant_id": tenant_id,
+        "worker_id": worker_id,
+        "timezone": timezone,
+        "schedule": {"hour": req.hour, "minute": req.minute},
+        "next_run_at": next_at.isoformat(),
     }
 
 
@@ -258,35 +327,23 @@ def run_worker_remote(
     if not record.sprite_name:
         raise HTTPException(status_code=409, detail="tenant Sprite is not provisioned")
 
-    run_id = "run_" + secrets.token_hex(12)
-    idem = req.idempotency_key or run_id
-    if not store.claim_run(run_id, tenant_id, worker_id, idem):
-        raise HTTPException(status_code=409, detail="duplicate idempotency key")
-
-    run_spec = {
-        "run_id": run_id,
-        "idempotency_key_hash": hashlib.sha256(idem.encode()).hexdigest(),
-        "tenant_id": record.tenant_id,
-        "name": record.name,
-        "timezone": record.timezone,
-        "workspace": "/workspace",
-        "workers": record.config.get("workers", []),
-        "outputs": record.config.get("outputs", ["files"]),
-        "schedule": record.config.get("schedule", {}),
-        "connections": record.config.get("connections", []),
-        "worker": worker_id,
-        "input": req.input,
-    }
+    idem = req.idempotency_key or ("request_" + secrets.token_urlsafe(24))
     try:
-        result = SpriteRunner().run(record.sprite_name, run_spec)
-    except Exception as e:
-        store.finish_run(run_id, "failed", {"error": str(e)})
-        raise HTTPException(status_code=502, detail=str(e)) from e
-    result_status = result.get("status", "failed")
-    store.finish_run(run_id, result_status, result)
-    if result_status != "completed":
+        run_id, result = dispatch_worker(
+            store,
+            SpriteRunner(),
+            record,
+            worker_id,
+            req.input,
+            idem,
+        )
+    except DuplicateRun as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except RunExecutionFailed as error:
         raise HTTPException(
             status_code=502,
-            detail={"run_id": run_id, "worker_status": result_status},
-        )
+            detail={"run_id": error.run_id, "worker_status": "failed"},
+        ) from error
+    except TenantStoreError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     return {"run_id": run_id, "result": result}

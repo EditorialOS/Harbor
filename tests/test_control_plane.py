@@ -2,7 +2,7 @@ import pytest
 from fastapi import HTTPException
 
 from harbor import control_plane
-from harbor.tenant_store import TenantStore
+from harbor.tenant_store import TenantStore, TenantStoreError
 
 
 def _tenant_store(tmp_path):
@@ -165,3 +165,56 @@ def test_remote_run_uses_internal_identity_and_surfaces_worker_failure(
             "SELECT status FROM runs WHERE run_id=?", (captured["run_id"],)
         ).fetchone()
     assert row[0] == "failed"
+
+
+def test_tenant_can_update_schedule_and_timezone(tmp_path, monkeypatch):
+    store, key = _tenant_store(tmp_path)
+    monkeypatch.setattr(control_plane, "store", store)
+
+    result = control_plane.update_worker_schedule(
+        "acme",
+        "newsletter-intelligence",
+        control_plane.ScheduleUpdate(hour=7, minute=45, timezone="America/New_York"),
+        authorization=f"Bearer {key}",
+    )
+
+    assert result["schedule"] == {"hour": 7, "minute": 45}
+    assert result["timezone"] == "America/New_York"
+    record = store.get("acme")
+    assert record.timezone == "America/New_York"
+    assert record.config["schedule"]["newsletter-intelligence"] == {
+        "hour": 7,
+        "minute": 45,
+    }
+    state = store.get_schedule_state("acme", "newsletter-intelligence")
+    assert state is not None
+    assert state.last_status == "scheduled"
+
+    with pytest.raises(HTTPException) as error:
+        control_plane.update_worker_schedule(
+            "acme",
+            "newsletter-intelligence",
+            control_plane.ScheduleUpdate(hour=7, timezone="Not/A-Timezone"),
+            authorization=f"Bearer {key}",
+        )
+    assert error.value.status_code == 400
+
+
+def test_tenant_creation_rejects_invalid_schedule_before_persisting(
+    tmp_path, monkeypatch
+):
+    store = TenantStore(f"sqlite:///{tmp_path / 'create-tenant.db'}")
+    monkeypatch.setattr(control_plane, "store", store)
+
+    with pytest.raises(HTTPException) as error:
+        control_plane.create_tenant(
+            control_plane.TenantCreate(
+                tenant_id="invalid",
+                name="Invalid",
+                timezone="Not/A-Timezone",
+            )
+        )
+
+    assert error.value.status_code == 422
+    with pytest.raises(TenantStoreError, match="unknown tenant"):
+        store.get("invalid")

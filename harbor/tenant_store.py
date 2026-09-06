@@ -45,7 +45,34 @@ class AuditRecord:
     created_at: str
 
 
-LATEST_SCHEMA_VERSION = 3
+@dataclass(frozen=True)
+class RunRecord:
+    run_id: str
+    tenant_id: str
+    worker_id: str
+    idempotency_key: str
+    status: str
+    result: dict[str, Any] | None
+    started_at: str
+    finished_at: str | None
+    attempt_count: int
+    last_error: str | None
+
+
+@dataclass(frozen=True)
+class ScheduleState:
+    tenant_id: str
+    worker_id: str
+    next_run_at: str
+    last_window_key: str | None
+    last_run_id: str | None
+    last_status: str
+    attempt_count: int
+    last_error: str | None
+    updated_at: str
+
+
+LATEST_SCHEMA_VERSION = 4
 
 _SCHEMA_MIGRATIONS_SQLITE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -127,6 +154,26 @@ _SQLITE_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS audit_tenant_created_idx ON audit_log (tenant_id, created_at DESC)",
         ),
     ),
+    (
+        4,
+        "scheduler_state_and_run_attempts",
+        (
+            "ALTER TABLE runs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE runs ADD COLUMN last_error TEXT",
+            """CREATE TABLE IF NOT EXISTS schedule_state (
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                worker_id TEXT NOT NULL,
+                next_run_at TEXT NOT NULL,
+                last_window_key TEXT,
+                last_run_id TEXT,
+                last_status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, worker_id)
+            )""",
+        ),
+    ),
 )
 
 _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
@@ -185,6 +232,26 @@ _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS audit_tenant_created_idx ON audit_log (tenant_id, created_at DESC)",
         ),
     ),
+    (
+        4,
+        "scheduler_state_and_run_attempts",
+        (
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE runs ADD COLUMN IF NOT EXISTS last_error TEXT",
+            """CREATE TABLE IF NOT EXISTS schedule_state (
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                worker_id TEXT NOT NULL,
+                next_run_at TIMESTAMPTZ NOT NULL,
+                last_window_key TEXT,
+                last_run_id TEXT,
+                last_status TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                updated_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (tenant_id, worker_id)
+            )""",
+        ),
+    ),
 )
 
 _FORBIDDEN_SECRET_KEYS = {
@@ -202,6 +269,12 @@ _FORBIDDEN_SECRET_KEYS = {
 
 def _utcnow() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def _time_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
 def _hash_key(key: str) -> str:
@@ -558,6 +631,71 @@ class TenantStore:
             )
         return self.get(tenant_id)
 
+    def update_worker_schedule(
+        self,
+        tenant_id: str,
+        worker_id: str,
+        schedule: dict[str, Any],
+        timezone: str,
+        *,
+        actor_type: str = "tenant_api",
+        actor_id: str | None = None,
+    ) -> TenantRecord:
+        validate_non_secret_metadata(schedule, "tenant.schedule")
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        select_sql = f"SELECT config_json FROM tenants WHERE tenant_id={placeholder}"
+        if self.kind == "postgres":
+            select_sql += " FOR UPDATE"
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(select_sql, (tenant_id,)).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(select_sql, (tenant_id,))
+                    row = cur.fetchone()
+            if not row:
+                raise TenantStoreError(f"unknown tenant '{tenant_id}'")
+            config = json.loads(row[0]) if isinstance(row[0], str) else dict(row[0])
+            if worker_id not in config.get("workers", []):
+                raise TenantStoreError(f"worker '{worker_id}' is not enabled")
+            schedules = dict(config.get("schedule", {}))
+            schedules[worker_id] = schedule
+            config["schedule"] = schedules
+            now = _utcnow()
+            payload = json.dumps(config)
+            if self.kind == "sqlite":
+                conn.execute(
+                    "UPDATE tenants SET timezone=?,config_json=?,updated_at=? WHERE tenant_id=?",
+                    (timezone, payload, now, tenant_id),
+                )
+                conn.execute(
+                    "DELETE FROM schedule_state WHERE tenant_id=? AND worker_id=?",
+                    (tenant_id, worker_id),
+                )
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE tenants SET timezone=%s,config_json=%s::jsonb,updated_at=%s
+                           WHERE tenant_id=%s""",
+                        (timezone, payload, now, tenant_id),
+                    )
+                    cur.execute(
+                        "DELETE FROM schedule_state WHERE tenant_id=%s AND worker_id=%s",
+                        (tenant_id, worker_id),
+                    )
+            self._insert_audit(
+                conn,
+                tenant_id,
+                "schedule.configured",
+                "worker",
+                worker_id,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                metadata={"timezone": timezone, **schedule},
+            )
+        return self.get(tenant_id)
+
     def record_connection_verification(
         self,
         tenant_id: str,
@@ -755,6 +893,181 @@ class TenantStore:
             if isinstance(e, TenantStoreError):
                 raise
             raise TenantStoreError(f"could not claim run '{run_id}': {e}") from e
+
+    def begin_run_attempt(self, run_id: str) -> int:
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                conn.execute(
+                    "UPDATE runs SET attempt_count=attempt_count+1,last_error=NULL WHERE run_id=?",
+                    (run_id,),
+                )
+                row = conn.execute(
+                    "SELECT attempt_count FROM runs WHERE run_id=?", (run_id,)
+                ).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE runs SET attempt_count=attempt_count+1,last_error=NULL
+                           WHERE run_id=%s RETURNING attempt_count""",
+                        (run_id,),
+                    )
+                    row = cur.fetchone()
+        if not row:
+            raise TenantStoreError(f"unknown run '{run_id}'")
+        return int(row[0])
+
+    def record_run_attempt_error(self, run_id: str, error: str) -> None:
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                cur = conn.execute(
+                    "UPDATE runs SET last_error=? WHERE run_id=?", (error, run_id)
+                )
+                rowcount = cur.rowcount
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE runs SET last_error=%s WHERE run_id=%s",
+                        (error, run_id),
+                    )
+                    rowcount = cur.rowcount
+        if rowcount != 1:
+            raise TenantStoreError(f"unknown run '{run_id}'")
+
+    def get_run_by_idempotency(
+        self, tenant_id: str, worker_id: str, idempotency_key: str
+    ) -> RunRecord | None:
+        placeholders = ("?", "?", "?") if self.kind == "sqlite" else ("%s", "%s", "%s")
+        sql = (
+            "SELECT run_id,tenant_id,worker_id,idempotency_key,status,result_json,"
+            "started_at,finished_at,attempt_count,last_error FROM runs WHERE "
+            f"tenant_id={placeholders[0]} AND worker_id={placeholders[1]} "
+            f"AND idempotency_key={placeholders[2]}"
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                row = conn.execute(
+                    sql, (tenant_id, worker_id, idempotency_key)
+                ).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (tenant_id, worker_id, idempotency_key))
+                    row = cur.fetchone()
+        if not row:
+            return None
+        result = json.loads(row[5]) if isinstance(row[5], str) else row[5]
+        return RunRecord(
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+            result,
+            _time_text(row[6]) or "",
+            _time_text(row[7]),
+            int(row[8]),
+            row[9],
+        )
+
+    def get_schedule_state(
+        self, tenant_id: str, worker_id: str
+    ) -> ScheduleState | None:
+        placeholders = ("?", "?") if self.kind == "sqlite" else ("%s", "%s")
+        sql = (
+            "SELECT tenant_id,worker_id,next_run_at,last_window_key,last_run_id,"
+            "last_status,attempt_count,last_error,updated_at FROM schedule_state "
+            f"WHERE tenant_id={placeholders[0]} AND worker_id={placeholders[1]}"
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                row = conn.execute(sql, (tenant_id, worker_id)).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (tenant_id, worker_id))
+                    row = cur.fetchone()
+        if not row:
+            return None
+        return ScheduleState(
+            row[0],
+            row[1],
+            _time_text(row[2]) or "",
+            row[3],
+            row[4],
+            row[5],
+            int(row[6]),
+            row[7],
+            _time_text(row[8]) or "",
+        )
+
+    def upsert_schedule_state(
+        self,
+        tenant_id: str,
+        worker_id: str,
+        *,
+        next_run_at: str,
+        last_window_key: str | None = None,
+        last_run_id: str | None = None,
+        last_status: str,
+        attempt_count: int = 0,
+        last_error: str | None = None,
+    ) -> ScheduleState:
+        now = _utcnow()
+        values = (
+            tenant_id,
+            worker_id,
+            next_run_at,
+            last_window_key,
+            last_run_id,
+            last_status,
+            attempt_count,
+            last_error,
+            now,
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                conn.execute(
+                    """INSERT INTO schedule_state
+                       (tenant_id,worker_id,next_run_at,last_window_key,last_run_id,
+                        last_status,attempt_count,last_error,updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(tenant_id,worker_id) DO UPDATE SET
+                         next_run_at=excluded.next_run_at,
+                         last_window_key=excluded.last_window_key,
+                         last_run_id=excluded.last_run_id,
+                         last_status=excluded.last_status,
+                         attempt_count=excluded.attempt_count,
+                         last_error=excluded.last_error,
+                         updated_at=excluded.updated_at""",
+                    values,
+                )
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO schedule_state
+                           (tenant_id,worker_id,next_run_at,last_window_key,last_run_id,
+                            last_status,attempt_count,last_error,updated_at)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                           ON CONFLICT(tenant_id,worker_id) DO UPDATE SET
+                             next_run_at=EXCLUDED.next_run_at,
+                             last_window_key=EXCLUDED.last_window_key,
+                             last_run_id=EXCLUDED.last_run_id,
+                             last_status=EXCLUDED.last_status,
+                             attempt_count=EXCLUDED.attempt_count,
+                             last_error=EXCLUDED.last_error,
+                             updated_at=EXCLUDED.updated_at""",
+                        values,
+                    )
+            self._insert_audit(
+                conn,
+                tenant_id,
+                "schedule.state.updated",
+                "worker",
+                worker_id,
+                metadata={"status": last_status},
+            )
+        state = self.get_schedule_state(tenant_id, worker_id)
+        if state is None:  # pragma: no cover - defensive after successful upsert
+            raise TenantStoreError("schedule state was not persisted")
+        return state
 
     def finish_run(self, run_id: str, status: str, result: dict[str, Any]) -> None:
         now = _utcnow()

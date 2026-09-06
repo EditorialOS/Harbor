@@ -205,10 +205,14 @@ class NewsletterIntelligenceWorker:
         )
         derived = _derive(data)
         report = _markdown(tenant, data, derived)
-        report_path = write_report(tenant.workspace, "newsletter-intelligence", report)
-
         run_id = inputs.get("_harbor_run_id") or (
             f"run_{dt.datetime.now(dt.timezone.utc):%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
+        )
+        report_path = write_report(
+            tenant.workspace,
+            "newsletter-intelligence",
+            report,
+            artifact_id=run_id,
         )
         run_record = {
             "run_id": run_id,

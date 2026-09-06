@@ -33,20 +33,41 @@
 - Sprite run specs now use a Harbor-generated run id, a unique internal path,
   and mode-0600 permissions; the same run id reaches worker artifacts.
 
+## Live pilot evidence completed
+
+- The Fly control plane is deployed against production Postgres state.
+- Harbor provisioned and verified a persistent tenant Sprite through the live
+  Sprites API, including wheel installation, command behavior, checkpointing,
+  cold wake, and persistent workspace files.
+- A policy-restricted Fly Custom API Connector was verified from inside that
+  tenant Sprite against a real beehiiv publication.
+- Newsletter Intelligence completed a real, zero-mock run; the Postgres run,
+  Sprite run artifact, and report artifact were reconciled by run id and hash.
+- A sanitized regression fixture preserves the verified beehiiv response shape
+  without retaining customer content or credentials.
+
+## Scheduler implemented, pending paid Machine deployment
+
+- A dedicated Fly process group discovers tenant schedules from Postgres.
+- Schedule state persists next run, last run, status, attempts, and errors.
+- Schedule-window idempotency prevents duplicate dispatch.
+- Retries are bounded and reuse one run id and report artifact.
+- Tenant time-zone changes are validated and updated through the authenticated
+  control-plane API; customer-specific values remain database state.
+- Long outages execute at most one overdue window rather than creating a
+  backlog storm.
+
 ## Still required for first live pilot
 
-- Actual Fly credentials/account connection.
-- Actual Postgres instance.
-- Actual pilot beehiiv connector and publication id.
-- Live validation of the current Sprites API/SDK adapter against the pilot organization.
-- Scheduler process.
+- Deploy the scheduler process group on one additional paid Fly Machine and
+  verify one scheduled live pull.
 - Email delivery adapter.
-- monitoring and retry policy.
+- Monitoring/alerts around the implemented retry policy.
+- Authenticated remote MCP surface.
 - second-tenant isolation test.
 
 ## Deliberately not faked
 
-- No claim that the code is deployed; no Fly credentials were available in this build environment.
 - No customer API key is embedded as an example production secret.
 - No fake production metrics are returned when a live connector is absent.
 - Alex v3 is still not marked runnable until the documented reconciliation is completed.

@@ -4,7 +4,12 @@
 [build]
   dockerfile = "Dockerfile"
 
+[processes]
+  app = "uvicorn harbor.control_plane:app --host 0.0.0.0 --port 8080"
+  scheduler = "python -m harbor.scheduler"
+
 [http_service]
+  processes = ["app"]
   internal_port = 8080
   force_https = true
   auto_stop_machines = "stop"
@@ -12,8 +17,14 @@
   min_machines_running = 1
 
 [[vm]]
+  processes = ["app"]
   size = "shared-cpu-1x"
   memory = "512mb"
+
+[[vm]]
+  processes = ["scheduler"]
+  size = "shared-cpu-1x"
+  memory = "256mb"
 
 [[http_service.checks]]
   grace_period = "10s"

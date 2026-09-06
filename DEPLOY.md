@@ -50,6 +50,10 @@ Do not place customer beehiiv credentials in Fly app secrets. Fly app secrets ar
 
 ## 4. Deploy control plane
 
+The Fly configuration defines two process groups: `app` for the HTTP control
+plane and `scheduler` for durable scheduled dispatch. Fly runs each group on a
+separate Machine. Review the added Machine cost before deploying this release.
+
 ```bash
 fly deploy -a "$HARBOR_FLY_APP"
 ```
@@ -124,9 +128,25 @@ curl -X POST "https://$HARBOR_FLY_APP.fly.dev/v1/tenants/pilot/workers/newslette
 
 A successful production result must not contain mock data.
 
-## 9. What remains before paid pilot
+## 9. Configure and verify scheduling
 
-- scheduler process;
+The tenant can update its worker schedule without source changes. Hours and
+minutes are interpreted in the supplied IANA time zone:
+
+```bash
+curl -X PUT "https://$HARBOR_FLY_APP.fly.dev/v1/tenants/pilot/workers/newsletter-intelligence/schedule" \
+  -H "Authorization: Bearer $PILOT_HARBOR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"hour": 6, "minute": 0, "timezone": "America/Los_Angeles"}'
+```
+
+The response includes `next_run_at`. Tenant status exposes the durable next/last
+schedule state. The scheduler derives one stable idempotency key per local-date
+window, uses bounded retries, and advances directly to the next future window
+after downtime.
+
+## 10. What remains before paid pilot
+
 - email output adapter;
 - monitoring/alerts;
 - connector onboarding UX;

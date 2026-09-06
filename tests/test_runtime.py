@@ -63,6 +63,17 @@ def test_control_plane_run_id_propagates_to_worker_artifacts(tmp_path):
     assert run_record["run_id"] == "run_control_plane_123"
     assert run_record["idempotency_key_hash"] == "digest-123"
 
+    retried = run_worker(
+        tenant,
+        "newsletter-intelligence",
+        {
+            "mode": "mock",
+            "_harbor_run_id": "run_control_plane_123",
+            "_harbor_idempotency_key_hash": "digest-123",
+        },
+    )
+    assert retried.deliverables == result.deliverables
+
 
 def test_plaintext_secret_is_rejected(tmp_path):
     p = tmp_path / "bad.json"
