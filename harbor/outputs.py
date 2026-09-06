@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import html
-import json
 import os
 import re
 import secrets
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+import httpx
 
 from .sprite_runner import SpriteRunner
 from .tenant_store import DeliveryRecord, TenantRecord, TenantStore, TenantStoreError
@@ -134,34 +133,33 @@ class ResendEmailAdapter:
         recipients: list[str],
         idempotency_key: str,
     ) -> AdapterReceipt:
-        payload = json.dumps(
-            {
-                "from": self.sender,
-                "to": recipients,
-                "subject": message.subject,
-                "text": message.text,
-                "html": message.html,
-            }
-        ).encode()
-        request = urllib.request.Request(
-            f"{self.api_base}/emails",
-            data=payload,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Idempotency-Key": idempotency_key,
-            },
-        )
+        payload = {
+            "from": self.sender,
+            "to": recipients,
+            "subject": message.subject,
+            "text": message.text,
+            "html": message.html,
+        }
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                result = json.loads(response.read())
-        except urllib.error.HTTPError as error:
-            raise DeliveryError(
-                f"email provider returned HTTP {error.code}"
-            ) from error
-        except (urllib.error.URLError, TimeoutError) as error:
+            response = httpx.post(
+                f"{self.api_base}/emails",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Idempotency-Key": idempotency_key,
+                },
+                timeout=30,
+            )
+        except httpx.RequestError as error:
             raise DeliveryError("email provider is unreachable") from error
+        if response.status_code >= 400:
+            raise DeliveryError(f"email provider returned HTTP {response.status_code}")
+        try:
+            result = response.json()
+        except ValueError as error:
+            raise DeliveryError(
+                "email provider returned an invalid response"
+            ) from error
         provider_message_id = result.get("id")
         if not isinstance(provider_message_id, str) or not provider_message_id:
             raise DeliveryError("email provider returned an invalid response")
@@ -244,7 +242,9 @@ class DeliveryCoordinator:
         if existing and existing.status == "delivered":
             return [_delivery_result(existing, True)]
 
-        delivery_id = existing.delivery_id if existing else "delivery_" + secrets.token_hex(12)
+        delivery_id = (
+            existing.delivery_id if existing else "delivery_" + secrets.token_hex(12)
+        )
         if existing is None:
             claimed = self.store.claim_delivery(
                 delivery_id,

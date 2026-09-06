@@ -1,6 +1,6 @@
 import json
-import urllib.error
 
+import httpx
 import pytest
 
 from harbor.outputs import (
@@ -77,7 +77,11 @@ def test_markdown_renderer_produces_text_and_escaped_html():
 
 def test_recipient_validation_rejects_header_injection_and_invalid_addresses():
     assert validate_email_recipient(" owner@example.com ") == "owner@example.com"
-    for invalid in ("not-an-email", "owner@localhost", "a@example.com\nBcc: bad@test.io"):
+    for invalid in (
+        "not-an-email",
+        "owner@localhost",
+        "a@example.com\nBcc: bad@test.io",
+    ):
         with pytest.raises(DeliveryError, match="recipient is invalid"):
             validate_email_recipient(invalid)
 
@@ -85,22 +89,14 @@ def test_recipient_validation_rejects_header_injection_and_invalid_addresses():
 def test_resend_adapter_uses_authenticated_idempotent_api_request(monkeypatch):
     captured = {}
 
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-        def read(self):
-            return b'{"id":"email_123"}'
-
-    def fake_urlopen(request, timeout):
-        captured["request"] = request
+    def fake_post(url, *, json, headers, timeout):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
         captured["timeout"] = timeout
-        return Response()
+        return httpx.Response(200, json={"id": "email_123"})
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("httpx.post", fake_post)
     receipt = ResendEmailAdapter(
         api_key="secret-key", sender="Harbor <reports@example.com>"
     ).deliver(
@@ -109,13 +105,11 @@ def test_resend_adapter_uses_authenticated_idempotent_api_request(monkeypatch):
         "delivery-v1:run:email:fingerprint",
     )
 
-    request = captured["request"]
-    assert request.full_url == "https://api.resend.com/emails"
-    assert request.get_method() == "POST"
-    assert request.headers["Authorization"] == "Bearer secret-key"
-    assert request.headers["Idempotency-key"] == "delivery-v1:run:email:fingerprint"
+    assert captured["url"] == "https://api.resend.com/emails"
+    assert captured["headers"]["Authorization"] == "Bearer secret-key"
+    assert captured["headers"]["Idempotency-Key"] == "delivery-v1:run:email:fingerprint"
     assert captured["timeout"] == 30
-    assert json.loads(request.data) == {
+    assert captured["json"] == {
         "from": "Harbor <reports@example.com>",
         "to": ["owner@example.com"],
         "subject": "Subject",
@@ -126,10 +120,10 @@ def test_resend_adapter_uses_authenticated_idempotent_api_request(monkeypatch):
 
 
 def test_resend_adapter_surfaces_sanitized_http_failure(monkeypatch):
-    def fail(request, timeout):
-        raise urllib.error.HTTPError(request.full_url, 401, "unauthorized", {}, None)
+    def fail(url, *, json, headers, timeout):
+        return httpx.Response(401, json={"message": "unauthorized"})
 
-    monkeypatch.setattr("urllib.request.urlopen", fail)
+    monkeypatch.setattr("httpx.post", fail)
     with pytest.raises(DeliveryError, match="HTTP 401") as error:
         ResendEmailAdapter(api_key="secret-key", sender="reports@example.com").deliver(
             OutputMessage("Subject", "plain", "<p>html</p>"),
@@ -179,9 +173,7 @@ def test_failed_delivery_is_persisted_and_retried_with_same_key(tmp_path, monkey
 
     with pytest.raises(DeliveryError):
         coordinator.deliver(store.get("acme"), "run_email", result)
-    existing = store.get_delivery_by_idempotency(
-        "acme", "email", adapter.calls[0][2]
-    )
+    existing = store.get_delivery_by_idempotency("acme", "email", adapter.calls[0][2])
     assert existing is not None
     assert existing.status == "failed"
     assert existing.attempt_count == 1
