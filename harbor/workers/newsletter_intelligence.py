@@ -65,6 +65,15 @@ def _recommendations(data: dict[str, Any], d: dict[str, Any]) -> list[str]:
             "Publish at least one issue before Harbor can establish a useful recent-performance signal."
         ]
 
+    if data.get("active_subscribers") == 0:
+        out.append(
+            "Build an initial active subscriber cohort before treating open and click rates as meaningful performance signals."
+        )
+    if latest.get("recipients") == 0:
+        out.append(
+            "The latest issue has no recorded email recipients; confirm the next issue is sent to subscribers before evaluating engagement."
+        )
+
     if d["open_delta"] is not None:
         if d["open_delta"] >= 0.01:
             out.append(
@@ -97,6 +106,15 @@ def _recommendations(data: dict[str, Any], d: dict[str, Any]) -> list[str]:
     return out[:3]
 
 
+def _comparison(metric: str, label: str, delta: float | None) -> str:
+    if delta is None:
+        return (
+            f"- {metric} cannot yet be compared because the publication baseline "
+            "is zero or unavailable."
+        )
+    return f"- {metric} are **{label}** the publication baseline ({delta:+.1%})."
+
+
 def _markdown(
     tenant: TenantConfig, data: dict[str, Any], derived: dict[str, Any]
 ) -> str:
@@ -124,24 +142,18 @@ def _markdown(
             f"- Latest: **{latest.get('title') or 'Untitled'}** — {_pct(latest.get('open_rate'))} open · {_pct(latest.get('click_rate'))} click",
             "",
             "## What matters",
-            f"- Opens are **{derived['open_label']}** the publication baseline"
-            + (
-                f" ({derived['open_delta']:+.1%})."
-                if derived["open_delta"] is not None
-                else "."
+            _comparison(
+                "Opens", derived["open_label"], derived["open_delta"]
             ),
-            f"- Clicks are **{derived['click_label']}** the publication baseline"
-            + (
-                f" ({derived['click_delta']:+.1%})."
-                if derived["click_delta"] is not None
-                else "."
+            _comparison(
+                "Clicks", derived["click_label"], derived["click_delta"]
             ),
         ]
-    if derived["best_open"]:
+    if derived["best_open"] and (derived["best_open"].get("open_rate") or 0) > 0:
         lines.append(
             f"- Strongest recent opener: **{derived['best_open'].get('title')}** at {_pct(derived['best_open'].get('open_rate'))}."
         )
-    if derived["best_click"]:
+    if derived["best_click"] and (derived["best_click"].get("click_rate") or 0) > 0:
         lines.append(
             f"- Strongest recent click performer: **{derived['best_click'].get('title')}** at {_pct(derived['best_click'].get('click_rate'))}."
         )

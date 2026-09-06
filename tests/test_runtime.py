@@ -81,3 +81,33 @@ def test_plaintext_secret_is_rejected(tmp_path):
         assert "plaintext secret" in str(e)
     else:
         raise AssertionError("plaintext secret should be rejected")
+
+
+def test_zero_baseline_report_has_actionable_guidance(tmp_path, monkeypatch):
+    tenant = load_tenant(_tenant(tmp_path))
+
+    monkeypatch.setattr(
+        "harbor.workers.newsletter_intelligence.beehiiv_client.publication_performance",
+        lambda *args, **kwargs: {
+            "publication_id": "pub_test",
+            "publication_name": "New publication",
+            "active_subscribers": 0,
+            "avg_open_rate": 0.0,
+            "avg_click_rate": 0.0,
+            "recent_posts": [
+                {
+                    "title": "First issue",
+                    "recipients": 0,
+                    "open_rate": 0.0,
+                    "click_rate": 0.0,
+                }
+            ],
+        },
+    )
+
+    result = run_worker(tenant, "newsletter-intelligence")
+    report = Path(result.deliverables[0]).read_text()
+    assert "baseline is zero or unavailable" in report
+    assert "Build an initial active subscriber cohort" in report
+    assert "no recorded email recipients" in report
+    assert "Strongest recent" not in report
