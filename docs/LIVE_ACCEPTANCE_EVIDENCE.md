@@ -9,7 +9,7 @@ identifiers, recipient addresses, or customer report content.
 - Harbor control-plane app: `harbor-roger-280`
 - Pilot Sprite: `harbor-pilot-07ae38b9`
 - Control-plane health: passing
-- Postgres schema version: 8
+- Postgres schema version: 9
 - Sprite runtime install, checkpoint, cold wake, persistent probe, and live
   worker reconciliation: passed using `docs/SPRITES_LIVE_VERIFICATION.md`
 
@@ -22,6 +22,17 @@ identifiers, recipient addresses, or customer report content.
 - Expired run lease count at verification: zero
 - Metrics expose aggregate counts without tenant identifiers: passed
 - External alert destination and alert rules: not yet configured
+
+## Authenticated web surface
+
+- Public landing page: HTTP 200
+- Existing pilot key exchanged for a hashed browser session: HTTP 303
+- Authenticated pilot workspace: HTTP 200
+- Pilot connection health and run history: visible
+- Second-tenant identifier in pilot workspace response: absent
+- Provider-credential and filesystem-path input fields: absent
+- Invite redemption, session hashing, CSRF, automatic provisioning, and failure
+  persistence: covered by local and PostgreSQL contract tests
 
 ## Scheduled and delivered live job
 

@@ -43,5 +43,8 @@ This alpha now has verified live-pilot evidence for its Fly control plane,
 Postgres state, tenant Sprite, restricted beehiiv connector, and unattended
 scheduled execution. A real report has also been delivered through the email
 adapter, and a second live tenant has proven API, MCP, run, file, Sprite, and
-connector-policy isolation. It is not beta or production-ready: a custom sender
-domain, alert routing, web onboarding, and ChatGPT OAuth onboarding remain gates.
+connector-policy isolation. An authenticated web workspace now exposes
+provisioning state, connection setup, scheduling, output settings, run controls,
+and run history. It is not beta or production-ready: a custom sender domain,
+alert routing, fully product-owned connector authorization, and ChatGPT OAuth
+onboarding remain gates.

@@ -74,6 +74,13 @@
 - MCP exposes worker catalog, safe tenant status, enabled workers, recent runs,
   and idempotent worker execution. Its schemas expose no tenant-config or
   filesystem-path parameter.
+- An invite-gated web surface creates a workspace, automatically provisions its
+  Sprite, and creates hashed browser sessions. Invitation and session tokens
+  are stored only as hashes.
+- The tenant-derived web workspace shows provisioning, connector health,
+  schedule, email settings, and recent runs, and can trigger an idempotent run.
+- Web forms use secure HttpOnly cookies, CSRF validation, no-cache/security
+  headers, and never accept provider credentials or filesystem paths.
 
 ## Live email and tenant-isolation evidence completed
 
@@ -100,7 +107,9 @@
   Prometheus metrics. Database-aware readiness, aggregate run/delivery counts,
   overdue schedules, expired leases, and the durable scheduler heartbeat are
   implemented and live.
-- Minimum end-user web onboarding and connector setup UX.
+- Replace the current guided Fly-dashboard connector handoff when Fly exposes a
+  documented supported connector-management API suitable for Harbor. The
+  current official flow requires connector creation/access policy in Fly's UI.
 - OAuth-based end-user onboarding for ChatGPT; direct bearer-authenticated MCP
   is available to clients that support custom authorization headers.
 

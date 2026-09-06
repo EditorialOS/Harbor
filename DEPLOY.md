@@ -156,9 +156,28 @@ after downtime.
 - a custom verified email-sending domain for recipients beyond the provider
   account owner;
 - alert rules and an external alert destination for the implemented metrics;
-- connector onboarding UX;
-- end-user account/session onboarding;
+- product-owned connector authorization when Fly provides a supported
+  connector-management API (the current guided flow hands off to Fly's UI);
 - OAuth onboarding for ChatGPT clients that cannot supply custom headers.
+
+## Web onboarding
+
+An operator creates a short-lived invitation through the admin API. The
+one-time invitation code is returned once and only its SHA-256 hash is stored.
+Deliver the code out of band; do not put it in a URL, log, or source file.
+
+```bash
+curl -X POST "https://$HARBOR_FLY_APP.fly.dev/v1/onboarding/invitations" \
+  -H "Authorization: Bearer $HARBOR_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"owner@example.com","expires_in_hours":24}'
+```
+
+The invited customer visits `/onboarding`, enters the invitation code, chooses
+the workspace name, time zone, schedule, and email output, and Harbor creates
+the tenant plus its private Sprite. The workspace ID and Harbor access key are
+shown once. `/login` exchanges that key for a 30-day server-side session whose
+token is stored only as a hash.
 
 ## Email output
 
