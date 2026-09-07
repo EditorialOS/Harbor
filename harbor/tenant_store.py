@@ -117,7 +117,7 @@ class WebSession:
     created_at: str
 
 
-LATEST_SCHEMA_VERSION = 9
+LATEST_SCHEMA_VERSION = 10
 
 _SCHEMA_MIGRATIONS_SQLITE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -298,6 +298,22 @@ _SQLITE_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS web_sessions_tenant_idx ON web_sessions (tenant_id)",
         ),
     ),
+    (
+        10,
+        "oauth_tenant_identities",
+        (
+            """CREATE TABLE IF NOT EXISTS oauth_identities (
+                issuer TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                email TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY (issuer, subject)
+            )""",
+            "CREATE INDEX IF NOT EXISTS oauth_identities_tenant_idx ON oauth_identities (tenant_id)",
+        ),
+    ),
 )
 
 _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
@@ -454,6 +470,22 @@ _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
                 created_at TIMESTAMPTZ NOT NULL
             )""",
             "CREATE INDEX IF NOT EXISTS web_sessions_tenant_idx ON web_sessions (tenant_id)",
+        ),
+    ),
+    (
+        10,
+        "oauth_tenant_identities",
+        (
+            """CREATE TABLE IF NOT EXISTS oauth_identities (
+                issuer TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                email TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                last_seen_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (issuer, subject)
+            )""",
+            "CREATE INDEX IF NOT EXISTS oauth_identities_tenant_idx ON oauth_identities (tenant_id)",
         ),
     ),
 )
@@ -720,13 +752,14 @@ class TenantStore:
         expires_in_hours: int = 24,
     ) -> tuple[OnboardingInvitation, str]:
         normalized_email = email.strip().lower()
-        if (
-            len(normalized_email) > 254
-            or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized_email)
+        if len(normalized_email) > 254 or not re.fullmatch(
+            r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized_email
         ):
             raise TenantStoreError("invitation email is invalid")
         if expires_in_hours < 1 or expires_in_hours > 168:
-            raise TenantStoreError("invitation lifetime must be between 1 and 168 hours")
+            raise TenantStoreError(
+                "invitation lifetime must be between 1 and 168 hours"
+            )
         invitation_id = "invite_" + secrets.token_hex(16)
         code = "harbor-invite-" + secrets.token_urlsafe(32)
         now = dt.datetime.now(dt.timezone.utc)
@@ -996,6 +1029,162 @@ class TenantStore:
                     cur.execute(sql, (tenant_id,))
                     row = cur.fetchone()
         return str(row[0]) if row else None
+
+    def set_workspace_owner(
+        self,
+        tenant_id: str,
+        email: str,
+        *,
+        actor_type: str = "admin_api",
+        actor_id: str | None = None,
+    ) -> str:
+        """Set the verified owner email used to bind external identities."""
+        normalized_email = email.strip().lower()
+        if len(normalized_email) > 254 or not re.fullmatch(
+            r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized_email
+        ):
+            raise TenantStoreError("workspace owner email is invalid")
+        self.get(tenant_id)
+        now = _utcnow()
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                conn.execute(
+                    """INSERT INTO workspace_owners (tenant_id,email,created_at)
+                       VALUES (?,?,?)
+                       ON CONFLICT(tenant_id) DO UPDATE SET email=excluded.email""",
+                    (tenant_id, normalized_email, now),
+                )
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO workspace_owners (tenant_id,email,created_at)
+                           VALUES (%s,%s,%s)
+                           ON CONFLICT(tenant_id) DO UPDATE SET email=excluded.email""",
+                        (tenant_id, normalized_email, now),
+                    )
+            self._insert_audit(
+                conn,
+                tenant_id,
+                "workspace.owner.updated",
+                "tenant",
+                tenant_id,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                metadata={"owner_email": normalized_email},
+            )
+        return normalized_email
+
+    def resolve_oauth_identity(self, issuer: str, subject: str) -> TenantRecord | None:
+        """Resolve a verified OAuth subject to exactly one active tenant."""
+        if not issuer or not subject:
+            return None
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        active_predicate = "t.active=1" if self.kind == "sqlite" else "t.active=TRUE"
+        sql = (
+            "SELECT i.tenant_id FROM oauth_identities i "
+            "JOIN tenants t ON t.tenant_id=i.tenant_id "
+            f"WHERE i.issuer={placeholder} AND i.subject={placeholder} "
+            f"AND {active_predicate}"
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                row = conn.execute(sql, (issuer, subject)).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (issuer, subject))
+                    row = cur.fetchone()
+        return self.get(str(row[0])) if row else None
+
+    def bind_oauth_identity(
+        self,
+        issuer: str,
+        subject: str,
+        verified_email: str,
+    ) -> TenantRecord:
+        """Bind an OAuth identity by an unambiguous verified owner email."""
+        normalized_email = verified_email.strip().lower()
+        if not issuer.startswith("https://") or len(issuer) > 500:
+            raise TenantStoreError("OAuth issuer is invalid")
+        if not subject or len(subject) > 500:
+            raise TenantStoreError("OAuth subject is invalid")
+        if len(normalized_email) > 254 or not re.fullmatch(
+            r"[^@\s]+@[^@\s]+\.[^@\s]+", normalized_email
+        ):
+            raise TenantStoreError("verified OAuth email is invalid")
+
+        existing = self.resolve_oauth_identity(issuer, subject)
+        if existing is not None:
+            return existing
+
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        active_predicate = "t.active=1" if self.kind == "sqlite" else "t.active=TRUE"
+        owner_sql = (
+            "SELECT o.tenant_id FROM workspace_owners o "
+            "JOIN tenants t ON t.tenant_id=o.tenant_id "
+            f"WHERE LOWER(o.email)={placeholder} AND {active_predicate}"
+        )
+        if self.kind == "postgres":
+            owner_sql += " FOR UPDATE"
+        now = _utcnow()
+        try:
+            with self._connect() as conn:
+                if self.kind == "sqlite":
+                    conn.execute("BEGIN IMMEDIATE")
+                    rows = conn.execute(owner_sql, (normalized_email,)).fetchall()
+                else:
+                    with conn.cursor() as cur:
+                        cur.execute(owner_sql, (normalized_email,))
+                        rows = cur.fetchall()
+                tenant_ids = sorted({str(row[0]) for row in rows})
+                if not tenant_ids:
+                    raise TenantStoreError(
+                        "OAuth identity does not match a Harbor workspace owner"
+                    )
+                if len(tenant_ids) != 1:
+                    raise TenantStoreError(
+                        "OAuth identity matches more than one Harbor workspace"
+                    )
+                tenant_id = tenant_ids[0]
+                values = (
+                    issuer,
+                    subject,
+                    tenant_id,
+                    normalized_email,
+                    now,
+                    now,
+                )
+                if self.kind == "sqlite":
+                    conn.execute(
+                        """INSERT INTO oauth_identities
+                           (issuer,subject,tenant_id,email,created_at,last_seen_at)
+                           VALUES (?,?,?,?,?,?)""",
+                        values,
+                    )
+                else:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO oauth_identities
+                               (issuer,subject,tenant_id,email,created_at,last_seen_at)
+                               VALUES (%s,%s,%s,%s,%s,%s)""",
+                            values,
+                        )
+                self._insert_audit(
+                    conn,
+                    tenant_id,
+                    "oauth.identity.bound",
+                    "oauth_identity",
+                    hashlib.sha256(f"{issuer}\0{subject}".encode()).hexdigest(),
+                    actor_type="oauth",
+                    metadata={"issuer": issuer, "owner_email": normalized_email},
+                )
+        except TenantStoreError:
+            raise
+        except Exception as error:
+            resolved = self.resolve_oauth_identity(issuer, subject)
+            if resolved is not None:
+                return resolved
+            raise TenantStoreError("OAuth identity could not be bound") from error
+        return self.get(tenant_id)
 
     def get(self, tenant_id: str) -> TenantRecord:
         placeholder = "?" if self.kind == "sqlite" else "%s"
@@ -1951,8 +2140,7 @@ class TenantStore:
         overdue_schedules = sum(
             1
             for next_run_at, last_status in schedule_rows
-            if last_status not in {"running"}
-            and parsed(next_run_at) < overdue_before
+            if last_status not in {"running"} and parsed(next_run_at) < overdue_before
         )
         expired_run_leases = sum(
             1

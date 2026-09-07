@@ -1,8 +1,11 @@
+from types import SimpleNamespace
+
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
 from harbor import control_plane
+from harbor.oauth import OAuthConfig
 from harbor.tenant_store import TenantStore, TenantStoreError
 
 
@@ -269,9 +272,7 @@ def test_tenant_can_configure_email_without_provider_credentials(tmp_path, monke
         )
 
 
-def test_admin_can_issue_hashed_one_time_onboarding_invitation(
-    tmp_path, monkeypatch
-):
+def test_admin_can_issue_hashed_one_time_onboarding_invitation(tmp_path, monkeypatch):
     store = TenantStore(f"sqlite:///{tmp_path / 'invitations.db'}")
     monkeypatch.setattr(control_plane, "store", store)
 
@@ -288,6 +289,40 @@ def test_admin_can_issue_hashed_one_time_onboarding_invitation(
         ).fetchone()[0]
     assert persisted != result["invitation_code"]
     assert result["invitation_code"] not in persisted
+
+
+def test_admin_can_configure_workspace_owner_for_oauth(tmp_path, monkeypatch):
+    store, _ = _tenant_store(tmp_path)
+    monkeypatch.setattr(control_plane, "store", store)
+
+    result = control_plane.update_workspace_owner(
+        "acme", control_plane.WorkspaceOwnerUpdate(email="Owner@Example.com")
+    )
+
+    assert result == {"tenant_id": "acme", "owner_configured": True}
+    assert store.workspace_owner_email("acme") == "owner@example.com"
+
+
+def test_oauth_protected_resource_metadata_uses_runtime_configuration(monkeypatch):
+    config = OAuthConfig(
+        issuer="https://auth.example.com/",
+        audience="https://harbor.example.com/mcp",
+        resource="https://harbor.example.com/mcp",
+    )
+    monkeypatch.setattr(
+        control_plane, "remote_mcp", SimpleNamespace(oauth_config=config)
+    )
+
+    metadata = control_plane.oauth_protected_resource_metadata()
+
+    assert metadata["resource"] == "https://harbor.example.com/mcp"
+    assert metadata["authorization_servers"] == ["https://auth.example.com/"]
+    assert metadata["scopes_supported"] == [
+        "openid",
+        "email",
+        "harbor:read",
+        "harbor:run",
+    ]
 
 
 def test_admin_sprite_provisioning_failure_is_persisted(tmp_path, monkeypatch):

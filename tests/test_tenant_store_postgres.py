@@ -131,3 +131,15 @@ def test_postgres_migrations_scoping_and_audit(postgres_store: TenantStore):
     assert postgres_store.workspace_owner_email(invited_tenant) == (
         f"owner-{suffix}@example.com"
     )
+    identity = postgres_store.bind_oauth_identity(
+        "https://auth.example.com/",
+        f"auth0|{suffix}",
+        f"owner-{suffix}@example.com",
+    )
+    assert identity.tenant_id == invited_tenant
+    assert (
+        postgres_store.resolve_oauth_identity(
+            "https://auth.example.com/", f"auth0|{suffix}"
+        ).tenant_id
+        == invited_tenant
+    )

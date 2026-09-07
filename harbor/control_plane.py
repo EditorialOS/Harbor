@@ -127,9 +127,23 @@ class OnboardingInvitationCreate(BaseModel):
     expires_in_hours: int = Field(default=24, ge=1, le=168)
 
 
+class WorkspaceOwnerUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=3, max_length=254)
+
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True, "service": "harbor-control-plane"}
+
+
+@app.get("/.well-known/oauth-protected-resource", include_in_schema=False)
+@app.get("/.well-known/oauth-protected-resource/mcp", include_in_schema=False)
+def oauth_protected_resource_metadata():
+    if remote_mcp.oauth_config is None:
+        raise HTTPException(status_code=404, detail="OAuth is not configured")
+    return remote_mcp.oauth_config.protected_resource_metadata()
 
 
 @app.get("/readyz")
@@ -228,6 +242,16 @@ def create_tenant(req: TenantCreate):
         "api_key": api_key,
         "next": "provision-sprite",
     }
+
+
+@app.put("/v1/tenants/{tenant_id}/owner", dependencies=[Depends(_admin)])
+def update_workspace_owner(tenant_id: str, req: WorkspaceOwnerUpdate):
+    try:
+        email = validate_email_recipient(req.email)
+        store.set_workspace_owner(tenant_id, email)
+    except (DeliveryError, TenantStoreError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"tenant_id": tenant_id, "owner_configured": True}
 
 
 @app.post("/v1/onboarding/invitations", dependencies=[Depends(_admin)])

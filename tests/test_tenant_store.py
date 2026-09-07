@@ -234,9 +234,7 @@ def test_operational_snapshot_applies_schedule_overdue_grace(tmp_path: Path):
     now = dt.datetime(2026, 9, 6, 13, 0, tzinfo=dt.timezone.utc)
     assert store.operational_snapshot(now)["overdue_schedules"] == 0
     assert (
-        store.operational_snapshot(now, overdue_grace_seconds=0)[
-            "overdue_schedules"
-        ]
+        store.operational_snapshot(now, overdue_grace_seconds=0)["overdue_schedules"]
         == 1
     )
 
@@ -318,6 +316,55 @@ def test_invitation_rejects_wrong_email_and_expiry(tmp_path: Path):
             "Expired Invite",
             "UTC",
             {"workers": [], "connections": []},
+        )
+
+
+def test_oauth_identity_binds_only_to_one_verified_workspace_owner(tmp_path: Path):
+    store = TenantStore(f"sqlite:///{tmp_path / 'oauth.db'}")
+    _create(store, "acme")
+    store.set_workspace_owner("acme", "Owner@Example.com")
+
+    bound = store.bind_oauth_identity(
+        "https://auth.example.com/", "auth0|owner", "owner@example.com"
+    )
+    assert bound.tenant_id == "acme"
+    assert (
+        store.resolve_oauth_identity(
+            "https://auth.example.com/", "auth0|owner"
+        ).tenant_id
+        == "acme"
+    )
+    assert "oauth.identity.bound" in {
+        event.action for event in store.list_audit("acme")
+    }
+
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT issuer,subject,tenant_id,email FROM oauth_identities"
+        ).fetchone()
+    assert tuple(row) == (
+        "https://auth.example.com/",
+        "auth0|owner",
+        "acme",
+        "owner@example.com",
+    )
+
+
+def test_oauth_identity_rejects_missing_or_ambiguous_owner(tmp_path: Path):
+    store = TenantStore(f"sqlite:///{tmp_path / 'oauth-ambiguous.db'}")
+    _create(store, "acme")
+    _create(store, "beta")
+
+    with pytest.raises(TenantStoreError, match="does not match"):
+        store.bind_oauth_identity(
+            "https://auth.example.com/", "auth0|missing", "missing@example.com"
+        )
+
+    store.set_workspace_owner("acme", "shared@example.com")
+    store.set_workspace_owner("beta", "shared@example.com")
+    with pytest.raises(TenantStoreError, match="more than one"):
+        store.bind_oauth_identity(
+            "https://auth.example.com/", "auth0|shared", "shared@example.com"
         )
 
 

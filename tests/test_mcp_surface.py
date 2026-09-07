@@ -2,8 +2,10 @@ import contextlib
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from mcp.server.auth.provider import AccessToken
 
 from harbor import mcp_server
+from harbor.oauth import OAuthConfig
 from harbor.remote_mcp import create_remote_mcp
 from harbor.tenant_store import TenantStore
 
@@ -38,9 +40,7 @@ def test_local_mcp_tools_import_with_v2_sdk():
     assert mcp_server.app is not None
 
 
-def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(
-    tmp_path, monkeypatch
-):
+def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkeypatch):
     monkeypatch.setenv("HARBOR_PUBLIC_URL", "http://testserver")
     store = TenantStore(f"sqlite:///{tmp_path / 'remote-mcp.db'}")
     _, key_a = store.create_tenant(
@@ -145,3 +145,87 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(
         assert len(runs_a) == 1
         assert runs_b == []
         assert "private-report.md" not in str(runs_a)
+
+
+def test_remote_mcp_oauth_challenge_scopes_and_tenant_resolution(tmp_path, monkeypatch):
+    monkeypatch.setenv("HARBOR_PUBLIC_URL", "http://testserver")
+    store = TenantStore(f"sqlite:///{tmp_path / 'remote-oauth.db'}")
+    store.create_tenant(
+        "acme",
+        "Acme",
+        "UTC",
+        {"workers": ["newsletter-intelligence"], "connections": []},
+    )
+    config = OAuthConfig(
+        issuer="https://auth.example.com/",
+        audience="http://testserver/mcp",
+        resource="http://testserver/mcp",
+    )
+
+    class Verifier:
+        async def verify_token(self, token):
+            if token == "valid-oauth":
+                return AccessToken(
+                    token=token,
+                    client_id="chatgpt-client",
+                    scopes=list(config.required_scopes),
+                    expires_at=9999999999,
+                    resource=config.resource,
+                    subject="auth0|owner",
+                    claims={
+                        "iss": config.issuer,
+                        "sub": "auth0|owner",
+                        "tenant_id": "acme",
+                    },
+                )
+            if token == "missing-run-scope":
+                return AccessToken(
+                    token=token,
+                    client_id="chatgpt-client",
+                    scopes=["openid", "email", "harbor:read"],
+                    expires_at=9999999999,
+                    resource=config.resource,
+                    subject="auth0|owner",
+                    claims={"tenant_id": "acme"},
+                )
+            return None
+
+    remote = create_remote_mcp(
+        store,
+        oauth_config=config,
+        token_verifier=Verifier(),
+    )
+    with TestClient(_mcp_test_app(remote)) as client:
+        missing = client.post("/mcp/", json={"jsonrpc": "2.0", "id": 1})
+        assert missing.status_code == 401
+        assert (
+            f'resource_metadata="{config.metadata_url}"'
+            in missing.headers["www-authenticate"]
+        )
+
+        insufficient = _request(client, "missing-run-scope", "tools/list")
+        assert insufficient.status_code == 403
+        assert 'error="insufficient_scope"' in insufficient.headers["www-authenticate"]
+
+        listed = _request(client, "valid-oauth", "tools/list")
+        assert listed.status_code == 200
+        tools = {tool["name"]: tool for tool in listed.json()["result"]["tools"]}
+        assert tools["harbor_status"]["_meta"]["securitySchemes"][0]["scopes"] == [
+            "openid",
+            "email",
+            "harbor:read",
+        ]
+        assert tools["harbor_run_worker"]["_meta"]["securitySchemes"][0]["scopes"] == [
+            "openid",
+            "email",
+            "harbor:read",
+            "harbor:run",
+        ]
+
+        status = _request(
+            client,
+            "valid-oauth",
+            "tools/call",
+            {"name": "harbor_status", "arguments": {}},
+        ).json()["result"]["structuredContent"]
+        assert status["tenant_id"] == "acme"

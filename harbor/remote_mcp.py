@@ -9,11 +9,15 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from mcp.server import MCPServer
+from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.provider import TokenVerifier
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import Context
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 
 from .dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
+from .oauth import READ_SCOPE, RUN_SCOPE, Auth0TokenVerifier, OAuthConfig
 from .outputs import DeliveryCoordinator
 from .sprite_runner import SpriteRunner
 from .tenant_store import RunRecord, TenantRecord, TenantStore, TenantStoreError
@@ -31,6 +35,13 @@ def _bearer(headers: Any) -> str:
 
 
 def _tenant_for_context(ctx: Context, store: TenantStore) -> TenantRecord:
+    access_token = get_access_token()
+    if access_token is not None and access_token.claims:
+        tenant_id = access_token.claims.get("tenant_id")
+        if isinstance(tenant_id, str) and tenant_id:
+            tenant = store.get(tenant_id)
+            if tenant.active:
+                return tenant
     tenant = store.resolve_api_key(_bearer(ctx.headers))
     if tenant is None:
         raise PermissionError("unauthorized")
@@ -91,6 +102,7 @@ class TenantBearerMiddleware:
 class RemoteMCP:
     server: MCPServer
     app: Any
+    oauth_config: OAuthConfig | None = None
 
 
 def _transport_security() -> TransportSecuritySettings:
@@ -111,18 +123,41 @@ def _transport_security() -> TransportSecuritySettings:
 def create_remote_mcp(
     store: TenantStore,
     runner_factory: Any = SpriteRunner,
+    *,
+    oauth_config: OAuthConfig | None = None,
+    token_verifier: TokenVerifier | None = None,
 ) -> RemoteMCP:
+    oauth_config = oauth_config if oauth_config is not None else OAuthConfig.from_env()
+    auth_settings = None
+    if oauth_config is not None:
+        auth_settings = AuthSettings(
+            issuer_url=oauth_config.issuer,
+            resource_server_url=oauth_config.resource,
+            required_scopes=list(oauth_config.required_scopes),
+            validate_token_resource=True,
+        )
+        token_verifier = token_verifier or Auth0TokenVerifier(store, oauth_config)
     server = MCPServer(
         "Harbor",
         instructions=(
             "Use Harbor to inspect and run workers for the authenticated workspace. "
             "Tenant identity always comes from the bearer credential."
         ),
+        auth=auth_settings,
+        token_verifier=token_verifier,
     )
+
+    read_security = [
+        {"type": "oauth2", "scopes": ["openid", "email", READ_SCOPE]},
+    ]
+    run_security = [
+        {"type": "oauth2", "scopes": ["openid", "email", READ_SCOPE, RUN_SCOPE]},
+    ]
 
     @server.tool(
         name="harbor_worker_catalog",
         annotations=ToolAnnotations(readOnlyHint=True),
+        meta={"securitySchemes": read_security},
     )
     def catalog(ctx: Context) -> dict[str, Any]:
         """List Harbor workers and whether they are enabled and runnable."""
@@ -142,6 +177,7 @@ def create_remote_mcp(
     @server.tool(
         name="harbor_status",
         annotations=ToolAnnotations(readOnlyHint=True),
+        meta={"securitySchemes": read_security},
     )
     def status(ctx: Context) -> dict[str, Any]:
         """Get safe status for the authenticated Harbor workspace."""
@@ -166,6 +202,7 @@ def create_remote_mcp(
     @server.tool(
         name="harbor_enabled_workers",
         annotations=ToolAnnotations(readOnlyHint=True),
+        meta={"securitySchemes": read_security},
     )
     def enabled_workers(ctx: Context) -> dict[str, Any]:
         """List workers enabled for the authenticated workspace."""
@@ -175,6 +212,7 @@ def create_remote_mcp(
     @server.tool(
         name="harbor_recent_runs",
         annotations=ToolAnnotations(readOnlyHint=True),
+        meta={"securitySchemes": read_security},
     )
     def recent_runs(ctx: Context, limit: int = 10) -> dict[str, Any]:
         """List recent run status without exposing tenant filesystem paths."""
@@ -193,6 +231,7 @@ def create_remote_mcp(
             idempotentHint=True,
             openWorldHint=True,
         ),
+        meta={"securitySchemes": run_security},
     )
     def run_worker(
         ctx: Context,
@@ -250,4 +289,6 @@ def create_remote_mcp(
         transport_security=_transport_security(),
         host="0.0.0.0",
     )
-    return RemoteMCP(server, TenantBearerMiddleware(asgi, store))
+    if oauth_config is not None:
+        return RemoteMCP(server, asgi, oauth_config)
+    return RemoteMCP(server, TenantBearerMiddleware(asgi, store), None)
