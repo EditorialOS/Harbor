@@ -284,7 +284,11 @@ def create_remote_mcp(
             "Render the authenticated workspace’s latest intelligence, sources, "
             "workers, recommendations, runs, and connection status."
         ),
-        annotations=ToolAnnotations(readOnlyHint=True),
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            openWorldHint=False,
+            destructiveHint=False,
+        ),
         meta={
             "securitySchemes": read_security,
             "openai/toolInvocation/invoking": "Opening Harbor…",
@@ -311,7 +315,11 @@ def create_remote_mcp(
 
     @server.tool(
         name="harbor_worker_catalog",
-        annotations=ToolAnnotations(readOnlyHint=True),
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            openWorldHint=False,
+            destructiveHint=False,
+        ),
         meta={"securitySchemes": read_security},
     )
     def catalog(ctx: Context) -> dict[str, Any]:
@@ -331,7 +339,11 @@ def create_remote_mcp(
 
     @server.tool(
         name="harbor_status",
-        annotations=ToolAnnotations(readOnlyHint=True),
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            openWorldHint=False,
+            destructiveHint=False,
+        ),
         meta={"securitySchemes": read_security},
     )
     def status(ctx: Context) -> dict[str, Any]:
@@ -362,7 +374,11 @@ def create_remote_mcp(
 
     @server.tool(
         name="harbor_enabled_workers",
-        annotations=ToolAnnotations(readOnlyHint=True),
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            openWorldHint=False,
+            destructiveHint=False,
+        ),
         meta={"securitySchemes": read_security},
     )
     def enabled_workers(ctx: Context) -> dict[str, Any]:
@@ -372,7 +388,11 @@ def create_remote_mcp(
 
     @server.tool(
         name="harbor_recent_runs",
-        annotations=ToolAnnotations(readOnlyHint=True),
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            openWorldHint=False,
+            destructiveHint=False,
+        ),
         meta={"securitySchemes": read_security},
     )
     def recent_runs(ctx: Context, limit: int = 10) -> dict[str, Any]:
@@ -388,7 +408,7 @@ def create_remote_mcp(
         name="harbor_run_worker",
         annotations=ToolAnnotations(
             readOnlyHint=False,
-            destructiveHint=False,
+            destructiveHint=True,
             idempotentHint=True,
             openWorldHint=True,
         ),

@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import html
+import os
 import re
 import secrets
 from collections.abc import Callable
@@ -67,7 +68,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px 6px
 form.inline{display:inline}form.inline button{margin:0}.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.small{font-size:13px}
 </style></head><body><main><nav><div class="brand">Harbor</div></nav>"""
         + content
-        + '<footer><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/status">Service status</a></footer></main></body></html>',
+        + '<footer><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/support">Support</a><a href="/status">Service status</a></footer></main></body></html>',
         status_code=status_code,
     )
     response.headers["Content-Security-Policy"] = (
@@ -356,6 +357,21 @@ def create_web_router(
 <section class="card"><h2>Your responsibilities</h2><p>You must be authorized to connect each source and delivery address. Do not use Harbor to process unlawful content or to interfere with another workspace or service.</p></section>
 <section class="card"><h2>Availability and outputs</h2><p>Harbor reports are informational and may contain errors. Scheduled delivery depends on connected providers and infrastructure. Failures are recorded visibly and retried according to Harbor’s operating policy.</p></section>
 <section class="card"><h2>Before public launch</h2><p>These terms are a product-completeness placeholder, not a final legal agreement. Pricing, cancellation, retention, support, liability, and governing-law terms must be approved before accepting public customers.</p><p class="muted small">Last updated September 8, 2026.</p></section>""",
+        )
+
+    @router.get("/support", response_class=HTMLResponse)
+    def support_page():
+        support_email = os.environ.get("HARBOR_SUPPORT_EMAIL", "").strip()
+        contact = (
+            f'<a class="button" href="mailto:{_escape(support_email)}">Email Harbor support</a>'
+            if support_email
+            else '<p class="status warn">A public support contact has not been configured yet.</p>'
+        )
+        return _page(
+            "Support",
+            f"""<h1>Harbor support</h1><p class="lede">Help with workspace access, connections, runs, delivery, and billing.</p>
+<section class="card"><h2>Before contacting support</h2><p>Open your Harbor workspace and note the time of the run or activity event. Never send API keys, passwords, access tokens, or connector credentials.</p>{contact}</section>
+<section class="card"><h2>Service health</h2><p>Check the public <a href="/status">service status page</a> for an active platform incident.</p></section>""",
         )
 
     @router.get("/status", response_class=HTMLResponse)

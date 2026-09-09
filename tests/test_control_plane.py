@@ -21,6 +21,18 @@ def _tenant_store(tmp_path):
     return store, key
 
 
+def test_openai_apps_challenge_is_exact_and_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("HARBOR_OPENAI_APPS_CHALLENGE", raising=False)
+    with pytest.raises(HTTPException) as missing:
+        control_plane.openai_apps_challenge()
+    assert missing.value.status_code == 404
+
+    monkeypatch.setenv("HARBOR_OPENAI_APPS_CHALLENGE", "openai-domain-token")
+    response = control_plane.openai_apps_challenge()
+    assert response.body == b"openai-domain-token"
+    assert response.media_type == "text/plain"
+
+
 def test_remote_run_rejects_mock_secrets_and_reserved_fields(tmp_path, monkeypatch):
     store, key = _tenant_store(tmp_path)
     monkeypatch.setattr(control_plane, "store", store)

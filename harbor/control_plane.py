@@ -49,7 +49,7 @@ async def _lifespan(_app: FastAPI):
         yield
 
 
-app = FastAPI(title="Harbor Control Plane", version="0.9.0-alpha", lifespan=_lifespan)
+app = FastAPI(title="Harbor Control Plane", version="1.0.0-rc.1", lifespan=_lifespan)
 app.mount("/mcp", remote_mcp.app)
 
 
@@ -157,6 +157,21 @@ def oauth_protected_resource_metadata():
     if remote_mcp.oauth_config is None:
         raise HTTPException(status_code=404, detail="OAuth is not configured")
     return remote_mcp.oauth_config.protected_resource_metadata()
+
+
+@app.get(
+    "/.well-known/openai-apps-challenge",
+    response_class=PlainTextResponse,
+    include_in_schema=False,
+)
+def openai_apps_challenge():
+    """Serve the exact per-submission token issued by OpenAI's review portal."""
+    token = os.environ.get("HARBOR_OPENAI_APPS_CHALLENGE", "")
+    if not token:
+        raise HTTPException(status_code=404, detail="challenge is not configured")
+    if len(token) > 512 or "\r" in token or "\n" in token:
+        raise HTTPException(status_code=503, detail="challenge is misconfigured")
+    return PlainTextResponse(token)
 
 
 @app.get("/readyz")

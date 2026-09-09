@@ -128,6 +128,24 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
         tools = {
             tool["name"]: tool for tool in listed.json()["result"]["tools"]
         }
+        for name in (
+            "harbor_dashboard",
+            "harbor_worker_catalog",
+            "harbor_status",
+            "harbor_enabled_workers",
+            "harbor_recent_runs",
+        ):
+            assert tools[name]["annotations"] == {
+                "readOnlyHint": True,
+                "openWorldHint": False,
+                "destructiveHint": False,
+            }
+        assert tools["harbor_run_worker"]["annotations"] == {
+            "readOnlyHint": False,
+            "openWorldHint": True,
+            "destructiveHint": True,
+            "idempotentHint": True,
+        }
         assert tools["harbor_dashboard"]["_meta"]["ui"] == {
             "resourceUri": "ui://harbor/dashboard-v1.html",
             "visibility": ["model", "app"],

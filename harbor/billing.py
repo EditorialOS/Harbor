@@ -245,6 +245,8 @@ def apply_stripe_event(
     event_type = event["type"]
     if event_type not in {
         "checkout.session.completed",
+        "checkout.session.async_payment_succeeded",
+        "checkout.session.async_payment_failed",
         "customer.subscription.created",
         "customer.subscription.updated",
         "customer.subscription.deleted",
@@ -276,13 +278,22 @@ def apply_stripe_event(
     if plan is None:
         raise BillingError("Stripe event does not match a Harbor plan")
 
-    if event_type == "checkout.session.completed":
+    if event_type.startswith("checkout.session."):
         subscription_id = (
             obj.get("subscription")
             if isinstance(obj.get("subscription"), str)
             else None
         )
-        status = "active"
+        payment_status = obj.get("payment_status")
+        payment_succeeded = event_type == "checkout.session.async_payment_succeeded"
+        payment_failed = event_type == "checkout.session.async_payment_failed"
+        status = (
+            "active"
+            if payment_succeeded or payment_status in {"paid", "no_payment_required"}
+            else "incomplete"
+        )
+        if payment_failed:
+            status = "incomplete"
     else:
         subscription_id = obj.get("id") if isinstance(obj.get("id"), str) else None
         status = "canceled" if event_type.endswith(".deleted") else obj.get("status")

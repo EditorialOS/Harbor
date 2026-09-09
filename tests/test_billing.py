@@ -89,6 +89,7 @@ def test_verified_webhook_is_idempotent_and_updates_entitlement(tmp_path, monkey
                 "client_reference_id": "billing-tenant",
                 "customer": "cus_example",
                 "subscription": "sub_example",
+                "payment_status": "paid",
                 "metadata": {"tenant_id": "billing-tenant", "plan": "starter"},
             }
         },
@@ -128,6 +129,7 @@ def test_subscription_cancel_revokes_entitlement(tmp_path, monkeypatch):
                 "client_reference_id": "billing-tenant",
                 "customer": "cus_example",
                 "subscription": "sub_example",
+                "payment_status": "paid",
                 "metadata": {"plan": "growth"},
             }
         },
@@ -242,6 +244,7 @@ def test_paid_onboarding_provisions_only_after_verified_webhook(tmp_path, monkey
                 "client_reference_id": record.tenant_id,
                 "customer": "cus_paid",
                 "subscription": "sub_paid",
+                "payment_status": "paid",
                 "metadata": {"tenant_id": record.tenant_id, "plan": "starter"},
             }
         },
@@ -258,3 +261,29 @@ def test_paid_onboarding_provisions_only_after_verified_webhook(tmp_path, monkey
     assert delivered.status_code == 200
     assert store.get(record.tenant_id).sprite_name == Runner.calls[0]
     assert billing_is_active(store.get_billing(record.tenant_id))
+
+
+def test_unpaid_checkout_does_not_activate_or_provision(tmp_path, monkeypatch):
+    _stripe_env(monkeypatch)
+    store = TenantStore(f"sqlite:///{tmp_path / 'unpaid-checkout.db'}")
+    _tenant(store)
+    client = StripeBillingClient()
+    event = {
+        "id": "evt_unpaid1",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "client_reference_id": "billing-tenant",
+                "customer": "cus_unpaid",
+                "subscription": "sub_unpaid",
+                "payment_status": "unpaid",
+                "metadata": {"plan": "starter"},
+            }
+        },
+    }
+
+    applied, activated = apply_stripe_event(store, client, event)
+
+    assert applied is True
+    assert activated is None
+    assert store.get_billing("billing-tenant").status == "incomplete"

@@ -110,12 +110,15 @@ def test_public_legal_status_pages_and_security_headers(tmp_path, monkeypatch):
 
     privacy = client.get("/privacy")
     terms = client.get("/terms")
+    support = client.get("/support")
     status = client.get("/status")
 
     assert privacy.status_code == 200
     assert "does not store the raw provider credential" in privacy.text
     assert terms.status_code == 200
     assert "not a final legal agreement" in terms.text
+    assert support.status_code == 200
+    assert "public support contact has not been configured" in support.text
     assert status.status_code == 200
     assert "Operational" in status.text
     assert "Strict-Transport-Security" in status.headers
