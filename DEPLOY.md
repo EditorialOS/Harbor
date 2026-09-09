@@ -98,6 +98,11 @@ endpoint, then leave it in runtime configuration for the reviewed version.
 8. Confirm the scheduler heartbeat remains healthy and the resulting run,
    report, and delivery are durable.
 
+The first run or connection check after a release compares the Sprite's runtime
+fingerprint with the bundled wheel. Harbor installs and checkpoints the new
+runtime before proceeding. Verify one existing tenant after every worker-code
+release; do not assume a control-plane deploy updated an idle Sprite.
+
 Readiness must report the code's current schema version. Migrations are ordered,
 transactional, and protected by a Postgres advisory lock. Never bypass a failed
 migration. See `docs/DATABASE_MIGRATIONS.md`.

@@ -13,6 +13,8 @@ declaring the service production-ready.
 - OAuth-authenticated remote MCP and an editorial ChatGPT app UI.
 - Durable scheduled runs, retries, idempotent delivery, audit visibility,
   readiness, metrics, and public aggregate status.
+- Automatic fingerprinted runtime upgrades for existing tenant Sprites before
+  their next connection check or worker run.
 - Stripe hosted Checkout, subscription entitlements, signed idempotent webhooks,
   cancellation gating, and hosted customer portal support.
 - Pre-launch privacy/terms pages and operator/customer documentation.

@@ -45,6 +45,12 @@ The control plane sends a non-secret run spec into the tenant Sprite. The spec c
 
 Worker output is written into the persistent tenant workspace and returned as a structured result to the control plane. The control plane persists the run state and dispatches the result to configured surfaces.
 
+Before a run or connection check, the infrastructure adapter compares a
+non-secret runtime fingerprint stored in the Sprite with the exact wheel bundled
+in the deployed control plane. A mismatch installs and checkpoints that released
+runtime before worker execution. Existing tenants therefore receive worker
+upgrades without source edits or manual Sprite access.
+
 ## Why Sprites are not the control plane
 
 Sprites are the execution computers. Harbor's public API, authentication, scheduler, and tenant routing need a stable trusted service. That belongs on Fly Machines. Keeping the two separate prevents tenant worker code and generated code from sharing the same trust boundary as Harbor's platform credentials.
