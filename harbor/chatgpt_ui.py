@@ -264,6 +264,28 @@ HARBOR_APP_HTML = r"""<!doctype html>
       return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
     }
 
+    function notify(method, params) {
+      window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
+    }
+
+    async function connect() {
+      try {
+        await request("ui/initialize", {
+          appInfo: { name: "Harbor", version: "1.0.0-rc.2" },
+          appCapabilities: {},
+          protocolVersion: "2026-01-26"
+        });
+        notify("ui/notifications/initialized", {});
+        if (window.openai?.toolOutput) render(window.openai.toolOutput);
+      } catch (error) {
+        if (window.openai?.toolOutput) {
+          render(window.openai.toolOutput);
+          return;
+        }
+        root.replaceChildren(el("div", "notice bad", "Harbor could not initialize its dashboard. Refresh the Harbor connection and try again."));
+      }
+    }
+
     async function runWorker(workerId, button, view) {
       button.disabled = true;
       button.textContent = "Running…";
@@ -295,7 +317,7 @@ HARBOR_APP_HTML = r"""<!doctype html>
       }
     }, { passive: true });
 
-    if (window.openai?.toolOutput) render(window.openai.toolOutput);
+    connect();
   </script>
 </body>
 </html>"""

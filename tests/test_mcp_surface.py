@@ -163,6 +163,9 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
             {"uri": "ui://harbor/dashboard-v1.html"},
         ).json()["result"]["contents"][0]
         assert resource["mimeType"] == "text/html;profile=mcp-app"
+        assert 'request("ui/initialize"' in resource["text"]
+        assert 'notify("ui/notifications/initialized"' in resource["text"]
+        assert 'protocolVersion: "2026-01-26"' in resource["text"]
         assert "ui/notifications/tool-result" in resource["text"]
         assert "harbor_run_worker" in resource["text"]
 

@@ -24,7 +24,7 @@ are visible and durable; there is no automatic sample-data fallback.
 
 ## Current release
 
-`1.0.0-rc.1` is a release candidate, not a production-ready declaration. The
+`1.0.0-rc.2` is a release candidate, not a production-ready declaration. The
 pilot flow has been executed on Fly with Postgres, two isolated Sprites, a real
 beehiiv connector, scheduled runs, persisted reports, email delivery, and an
 OAuth-authenticated ChatGPT app. See `docs/LIVE_ACCEPTANCE_EVIDENCE.md` for
