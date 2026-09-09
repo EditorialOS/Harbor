@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .billing import billing_is_active
 from .dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
 from .outputs import DeliveryCoordinator
 from .sprite_runner import SpriteRunner
@@ -116,6 +117,10 @@ class Scheduler:
         now = now.astimezone(dt.timezone.utc)
         events: list[dict[str, Any]] = []
         for tenant in self.store.list_active():
+            if tenant.config.get("billing_required") and not billing_is_active(
+                self.store.get_billing(tenant.tenant_id)
+            ):
+                continue
             schedules = tenant.config.get("schedule", {})
             for worker_id, raw_schedule in schedules.items():
                 if worker_id not in tenant.config.get("workers", []):

@@ -20,6 +20,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from .billing import (
+    PLANS,
+    BillingError,
+    StripeBillingClient,
+    apply_stripe_event,
+    billing_is_active,
+    billing_required,
+)
 from .dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
 from .outputs import (
     DeliveryCoordinator,
@@ -157,9 +165,7 @@ def _timezone_options(selected: str) -> str:
 
 def _valid_gateway(connection_id: str, gateway_base_url: str) -> bool:
     parsed = urlsplit(gateway_base_url)
-    expected = re.compile(
-        rf"^/v1/gateway/[a-z0-9_-]+/{re.escape(connection_id)}/?$"
-    )
+    expected = re.compile(rf"^/v1/gateway/[a-z0-9_-]+/{re.escape(connection_id)}/?$")
     return bool(
         parsed.scheme == "https"
         and parsed.hostname == "api.sprites.dev"
@@ -216,9 +222,12 @@ def _connection_form(
 
 def _provision(store: TenantStore, runner: Any, tenant_id: str) -> bool:
     record = store.get(tenant_id)
-    sprite_name = record.sprite_name or (
-        f"harbor-{_slug(tenant_id)}-{hashlib.sha256(tenant_id.encode()).hexdigest()[:8]}"
-    )[:63]
+    sprite_name = (
+        record.sprite_name
+        or (
+            f"harbor-{_slug(tenant_id)}-{hashlib.sha256(tenant_id.encode()).hexdigest()[:8]}"
+        )[:63]
+    )
     store.record_provisioning_status(
         tenant_id, "provisioning", actor_type="web_onboarding"
     )
@@ -251,9 +260,38 @@ def _notice(value: str | None) -> str:
         "sprite_ready": "Your private Harbor computer is ready.",
         "sprite_failed": "Provisioning failed and was recorded. You can safely retry.",
         "csrf_failed": "That form expired. Refresh this page and try again.",
+        "billing_success": "Payment received. Harbor is activating your workspace now.",
+        "billing_canceled": "Checkout was canceled. Nothing was charged.",
+        "billing_failed": "Billing could not be opened. Please try again.",
     }
     message = messages.get(value or "")
     return f'<div class="notice">{_escape(message)}</div>' if message else ""
+
+
+def _requires_active_billing(store: TenantStore, record: Any) -> bool:
+    return bool(record.config.get("billing_required")) and not billing_is_active(
+        store.get_billing(record.tenant_id)
+    )
+
+
+def _pricing_cards(csrf_token: str, billing: Any | None) -> str:
+    current = (
+        f'<p class="status ok">Current plan: {_escape(billing.plan.title())}</p>'
+        if billing_is_active(billing)
+        else '<p class="status warn">Choose a plan to activate Harbor.</p>'
+    )
+    cards = "".join(
+        f"""<section class="card"><h2>{_escape(plan.name)}</h2><p class="lede">${plan.monthly_dollars}/month</p>
+<p>{"1 source" if plan.source_limit == 1 else ("Up to 3 sources" if plan.source_limit == 3 else "Expanded sources and API access")}</p>
+<form method="post" action="/app/billing/checkout"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><input type="hidden" name="plan" value="{_escape(plan.id)}"><button type="submit">Choose {_escape(plan.name)}</button></form></section>"""
+        for plan in PLANS
+    )
+    portal = (
+        f"""<form method="post" action="/app/billing/portal"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><button class="secondary" type="submit">Manage billing</button></form>"""
+        if billing and billing.stripe_customer_id
+        else ""
+    )
+    return current + f'<div class="grid">{cards}</div>' + portal
 
 
 def _send_access_code(
@@ -341,7 +379,7 @@ def create_web_router(
             "Service status",
             f"""<h1>Harbor service status</h1><p class="lede status {css}">{status}</p>
 <section class="card"><h2>Control plane</h2><p class="status {css}">{status}</p></section>
-<section class="card"><h2>Scheduler</h2><p>{_escape(heartbeat.replace('_', ' ').title())}</p></section>
+<section class="card"><h2>Scheduler</h2><p>{_escape(heartbeat.replace("_", " ").title())}</p></section>
 <p class="muted small">This page reports aggregate service health and never exposes customer identifiers or activity.</p>""",
             status_code=200 if healthy else 503,
         )
@@ -388,7 +426,7 @@ def create_web_router(
         return _page(
             "Check your email",
             f"""<h1>Check your email</h1><p class="lede">If this email can create a workspace, a verification code is on its way.</p>
-<a class="button" href="/onboarding?{urlencode({'email': email.strip().lower()})}">Enter verification code</a>""",
+<a class="button" href="/onboarding?{urlencode({"email": email.strip().lower()})}">Enter verification code</a>""",
         )
 
     @router.get("/login", response_class=HTMLResponse)
@@ -492,7 +530,7 @@ def create_web_router(
 <label for="invitation_code">Verification code</label><input id="invitation_code" name="invitation_code" required maxlength="200" autocomplete="one-time-code">
 <label for="email">Email</label><input id="email" name="email" type="email" value="{_escape(email)}" required maxlength="254" autocomplete="email">
 <label for="workspace_name">Workspace name</label><input id="workspace_name" name="workspace_name" required maxlength="100">
-<label for="timezone">Time zone</label><select id="timezone" name="timezone" required>{_timezone_options('America/Los_Angeles')}</select>
+<label for="timezone">Time zone</label><select id="timezone" name="timezone" required>{_timezone_options("America/Los_Angeles")}</select>
 <label for="hour">Morning report hour (0–23)</label><input id="hour" name="hour" type="number" min="0" max="23" value="6" required>
 <label><input type="checkbox" checked required>Enable Newsletter Intelligence</label>
 <label><input name="email_delivery" type="checkbox" value="yes" checked>Deliver reports to the invited email</label>
@@ -509,6 +547,13 @@ def create_web_router(
         email_delivery: str | None = Form(default=None),
     ):
         store = store_getter()
+        stripe = StripeBillingClient()
+        if billing_required() and not stripe.configured():
+            return _page(
+                "Billing unavailable",
+                '<h1>Workspace signup is temporarily unavailable</h1><p class="lede">Harbor billing has not been fully configured. No workspace was created.</p>',
+                status_code=503,
+            )
         try:
             ZoneInfo(timezone)
             normalized_email = validate_email_recipient(email)
@@ -520,6 +565,7 @@ def create_web_router(
                 "outputs": outputs,
                 "connections": [],
                 "provisioning": {"status": "pending"},
+                "billing_required": billing_required(),
             }
             if email_delivery == "yes":
                 outputs.append("email")
@@ -548,15 +594,25 @@ def create_web_router(
                 next_at.isoformat(),
                 actor_type="web_onboarding",
             )
-        except (TenantStoreError, DeliveryError, ValueError, ZoneInfoNotFoundError) as error:
+        except (
+            TenantStoreError,
+            DeliveryError,
+            ValueError,
+            ZoneInfoNotFoundError,
+        ) as error:
             return _page(
                 "Create workspace",
                 f'<h1>Workspace not created</h1><p class="lede">{_escape(error)}</p><a class="button" href="/onboarding">Try again</a>',
                 status_code=400,
             )
 
-        provisioned = _provision(store, runner_factory(), record.tenant_id)
         _, token, csrf_token = store.create_web_session(record.tenant_id)
+        if record.config.get("billing_required"):
+            response = _redirect("/app/billing")
+            _set_session_cookies(response, token, csrf_token)
+            return response
+
+        provisioned = _provision(store, runner_factory(), record.tenant_id)
         state = (
             '<span class="status ok">Your private Harbor computer is ready.</span>'
             if provisioned
@@ -581,6 +637,8 @@ def create_web_router(
             _clear_session_cookies(response)
             return response
         record = store.get(session.tenant_id)
+        billing = store.get_billing(record.tenant_id)
+        billing_gate = _requires_active_billing(store, record)
         schedule = (record.config.get("schedule") or {}).get(
             "newsletter-intelligence", {"hour": 6, "minute": 0}
         )
@@ -588,7 +646,11 @@ def create_web_router(
             record.tenant_id, "newsletter-intelligence"
         )
         provisioning = record.config.get("provisioning") or {}
-        if record.sprite_name:
+        if billing_gate:
+            sprite_status = (
+                '<span class="status warn">Waiting for plan activation</span>'
+            )
+        elif record.sprite_name:
             sprite_status = '<span class="status ok">Ready</span>'
         elif provisioning.get("status") == "failed":
             sprite_status = '<span class="status bad">Needs retry</span>'
@@ -612,43 +674,58 @@ def create_web_router(
         email_enabled = "email" in record.config.get("outputs", [])
         owner_email = store.workspace_owner_email(record.tenant_id) or ""
         runs = store.list_runs(record.tenant_id, limit=10)
-        run_rows = "".join(
-            f"<tr><td>{_escape(run.started_at[:19].replace('T', ' '))}</td><td>{_escape(run.status)}</td><td>{_escape(run.attempt_count)}</td></tr>"
-            for run in runs
-        ) or '<tr><td colspan="3" class="muted">No runs yet.</td></tr>'
+        run_rows = (
+            "".join(
+                f"<tr><td>{_escape(run.started_at[:19].replace('T', ' '))}</td><td>{_escape(run.status)}</td><td>{_escape(run.attempt_count)}</td></tr>"
+                for run in runs
+            )
+            or '<tr><td colspan="3" class="muted">No runs yet.</td></tr>'
+        )
         audit = store.list_audit(record.tenant_id, limit=10)
-        audit_rows = "".join(
-            f"<tr><td>{_escape(event.created_at[:19].replace('T', ' '))}</td><td>{_escape(event.action.replace('.', ' ').title())}</td></tr>"
-            for event in audit
-        ) or '<tr><td colspan="2" class="muted">No activity yet.</td></tr>'
+        audit_rows = (
+            "".join(
+                f"<tr><td>{_escape(event.created_at[:19].replace('T', ' '))}</td><td>{_escape(event.action.replace('.', ' ').title())}</td></tr>"
+                for event in audit
+            )
+            or '<tr><td colspan="2" class="muted">No activity yet.</td></tr>'
+        )
         next_run = (
             _escape(schedule_state.next_run_at)
             if schedule_state
             else "Waiting for scheduler"
         )
         provisioning_action = ""
-        if not record.sprite_name:
+        if not record.sprite_name and not billing_gate:
             provisioning_action = f"""<form method="post" action="/app/provision"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><button type="submit">Retry provisioning</button></form>"""
+        billing_card = ""
+        if record.config.get("billing_required") or billing is not None:
+            billing_status = (
+                f'<span class="status ok">{_escape(billing.plan.title())} · {_escape(billing.status.title())}</span>'
+                if billing_is_active(billing)
+                else '<span class="status warn">Plan required</span>'
+            )
+            billing_card = f'<section class="card"><h2>Plan</h2><p>{billing_status}</p><a class="button secondary" href="/app/billing">View billing</a></section>'
         run_operation = "web_" + secrets.token_urlsafe(24)
         content = f"""<h1>{_escape(record.name)}</h1><p class="lede">Newsletter Intelligence workspace</p>{_notice(notice)}
 <div class="grid"><div class="card"><h2>Private worker computer</h2><p>{sprite_status}</p>{provisioning_action}</div>
 <div class="card"><h2>beehiiv source</h2><p>{connection_status}</p></div>
 <div class="card"><h2>Next report</h2><p class="status">{next_run}</p></div></div>
+{billing_card}
 
 <section class="card"><h2>Connect beehiiv</h2>
-{_connection_form(connection, publication_choices, csrf_token, bool(record.sprite_name))}</section>
+{_connection_form(connection, publication_choices, csrf_token, bool(record.sprite_name) and not billing_gate)}</section>
 
 <div class="grid"><section class="card"><h2>Schedule</h2><form method="post" action="/app/schedule"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
-<label>Morning hour (0–23)</label><input name="hour" type="number" min="0" max="23" value="{_escape(schedule.get('hour', 6))}" required>
-<label>Minute</label><input name="minute" type="number" min="0" max="59" value="{_escape(schedule.get('minute', 0))}" required>
+<label>Morning hour (0–23)</label><input name="hour" type="number" min="0" max="23" value="{_escape(schedule.get("hour", 6))}" required>
+<label>Minute</label><input name="minute" type="number" min="0" max="59" value="{_escape(schedule.get("minute", 0))}" required>
 <label>Time zone</label><select name="timezone" required>{_timezone_options(record.timezone)}</select><button type="submit">Save schedule</button></form></section>
 
 <section class="card"><h2>Email output</h2><form method="post" action="/app/email"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
-<label><input name="enabled" type="checkbox" value="yes" {'checked' if email_enabled else ''}>Send report by email</label>
-<label>Recipient</label><input name="recipient" type="email" value="{_escape((email_config.get('recipients') or [owner_email])[0] if (email_config.get('recipients') or [owner_email]) else '')}" maxlength="254">
+<label><input name="enabled" type="checkbox" value="yes" {"checked" if email_enabled else ""}>Send report by email</label>
+<label>Recipient</label><input name="recipient" type="email" value="{_escape((email_config.get("recipients") or [owner_email])[0] if (email_config.get("recipients") or [owner_email]) else "")}" maxlength="254">
 <button type="submit">Save email output</button></form></section></div>
 
-<section class="card"><h2>Run now</h2><p>Uses the same worker and delivery path as the scheduler.</p><form method="post" action="/app/run"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><input type="hidden" name="idempotency_key" value="{_escape(run_operation)}"><button type="submit" {'disabled' if not record.sprite_name else ''}>Run Newsletter Intelligence</button></form></section>
+<section class="card"><h2>Run now</h2><p>Uses the same worker and delivery path as the scheduler.</p><form method="post" action="/app/run"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><input type="hidden" name="idempotency_key" value="{_escape(run_operation)}"><button type="submit" {"disabled" if not record.sprite_name or billing_gate else ""}>Run Newsletter Intelligence</button></form></section>
 
 <section class="card"><h2>Recent runs</h2><table><thead><tr><th>Started (UTC)</th><th>Status</th><th>Attempts</th></tr></thead><tbody>{run_rows}</tbody></table></section>
 <section class="card"><h2>Workspace activity</h2><table><thead><tr><th>Time (UTC)</th><th>Event</th></tr></thead><tbody>{audit_rows}</tbody></table></section>
@@ -664,14 +741,99 @@ def create_web_router(
             return None
         return store, session
 
+    @router.get("/app/billing", response_class=HTMLResponse)
+    def billing_page(request: Request, notice: str | None = None):
+        store = store_getter()
+        session = _session(request, store)
+        csrf_token = request.cookies.get(CSRF_COOKIE, "")
+        if not session or not store.verify_web_csrf(session, csrf_token):
+            return _redirect("/login")
+        stripe = StripeBillingClient()
+        if not stripe.configured():
+            return _page(
+                "Billing",
+                '<h1>Billing is not configured yet</h1><p class="lede">Harbor has not enabled paid checkout for this environment.</p><a class="button secondary" href="/app">Back to workspace</a>',
+                status_code=503,
+            )
+        billing = store.get_billing(session.tenant_id)
+        return _page(
+            "Plans",
+            f'<h1>Choose your Harbor plan</h1><p class="lede">Secure monthly billing is handled on Stripe’s hosted Checkout.</p>{_notice(notice)}'
+            + _pricing_cards(csrf_token, billing)
+            + '<a class="button secondary" href="/app">Back to workspace</a>',
+        )
+
+    @router.post("/app/billing/checkout")
+    def billing_checkout(
+        request: Request,
+        csrf_token: str = Form(...),
+        plan: str = Form(..., min_length=2, max_length=64),
+    ):
+        context = authenticated_form(request, csrf_token)
+        if not context:
+            return _redirect("/app?notice=csrf_failed")
+        store, session = context
+        record = store.get(session.tenant_id)
+        billing = store.get_billing(record.tenant_id)
+        email = store.workspace_owner_email(record.tenant_id)
+        if not email:
+            return _redirect("/app/billing?notice=billing_failed")
+        try:
+            url = StripeBillingClient().create_checkout(
+                record.tenant_id,
+                email,
+                plan,
+                customer_id=billing.stripe_customer_id if billing else None,
+            )
+        except BillingError:
+            return _redirect("/app/billing?notice=billing_failed")
+        return RedirectResponse(url, status_code=303)
+
+    @router.post("/app/billing/portal")
+    def billing_portal(request: Request, csrf_token: str = Form(...)):
+        context = authenticated_form(request, csrf_token)
+        if not context:
+            return _redirect("/app?notice=csrf_failed")
+        store, session = context
+        billing = store.get_billing(session.tenant_id)
+        try:
+            url = StripeBillingClient().create_portal(
+                billing.stripe_customer_id if billing else ""
+            )
+        except BillingError:
+            return _redirect("/app/billing?notice=billing_failed")
+        return RedirectResponse(url, status_code=303)
+
+    @router.post("/stripe/webhook")
+    async def stripe_webhook(request: Request):
+        client = StripeBillingClient()
+        try:
+            event = client.verify_webhook(
+                await request.body(), request.headers.get("Stripe-Signature", "")
+            )
+            store = store_getter()
+            _applied, activated_tenant = apply_stripe_event(store, client, event)
+            if activated_tenant:
+                record = store.get(activated_tenant)
+                if not record.sprite_name:
+                    _provision(store, runner_factory(), activated_tenant)
+        except (BillingError, TenantStoreError):
+            return HTMLResponse("invalid webhook", status_code=400)
+        return HTMLResponse("ok", status_code=200)
+
     @router.post("/app/provision")
     def provision(request: Request, csrf_token: str = Form(...)):
         context = authenticated_form(request, csrf_token)
         if not context:
             return _redirect("/app?notice=csrf_failed")
         store, session = context
+        record = store.get(session.tenant_id)
+        if _requires_active_billing(store, record):
+            return _redirect("/app/billing")
         success = _provision(store, runner_factory(), session.tenant_id)
-        return _redirect("/app?notice=" + ("sprite_ready" if success else "sprite_failed"))
+        return _redirect(
+            "/app?notice=" + ("sprite_ready" if success else "sprite_failed")
+        )
 
     @router.post("/app/schedule")
     def update_schedule(
@@ -716,7 +878,9 @@ def create_web_router(
             return _redirect("/app?notice=csrf_failed")
         store, session = context
         try:
-            recipients = [validate_email_recipient(recipient)] if enabled == "yes" else []
+            recipients = (
+                [validate_email_recipient(recipient)] if enabled == "yes" else []
+            )
             store.configure_email_output(
                 session.tenant_id,
                 enabled=enabled == "yes",
@@ -739,6 +903,14 @@ def create_web_router(
             return _redirect("/app?notice=csrf_failed")
         store, session = context
         record = store.get(session.tenant_id)
+        if _requires_active_billing(store, record):
+            return _redirect("/app/billing")
+        billing = store.get_billing(record.tenant_id)
+        if (
+            billing
+            and len(record.config.get("connections", [])) >= billing.source_limit
+        ):
+            return _redirect("/app?notice=connection_failed")
         if not record.sprite_name:
             return _redirect("/app?notice=connection_failed")
         connection_id: str | None = None
@@ -795,7 +967,10 @@ def create_web_router(
         except Exception as error:  # noqa: BLE001 - connector adapter boundary
             result = {
                 "status": "failed",
-                "error": {"kind": type(error).__name__, "detail": "connection verification failed"},
+                "error": {
+                    "kind": type(error).__name__,
+                    "detail": "connection verification failed",
+                },
             }
             try:
                 if connection_id is None:
@@ -863,6 +1038,8 @@ def create_web_router(
             return _redirect("/app?notice=csrf_failed")
         store, session = context
         record = store.get(session.tenant_id)
+        if _requires_active_billing(store, record):
+            return _redirect("/app/billing")
         if not record.sprite_name:
             return _redirect("/app?notice=run_failed")
         runner = runner_factory()
@@ -887,7 +1064,11 @@ def create_web_router(
             )
             return _redirect(
                 "/app?notice="
-                + ("run_completed" if existing and existing.status == "completed" else "run_failed")
+                + (
+                    "run_completed"
+                    if existing and existing.status == "completed"
+                    else "run_failed"
+                )
             )
         except (RunExecutionFailed, TenantStoreError):
             return _redirect("/app?notice=run_failed")

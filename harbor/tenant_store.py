@@ -117,7 +117,20 @@ class WebSession:
     created_at: str
 
 
-LATEST_SCHEMA_VERSION = 11
+@dataclass(frozen=True)
+class BillingRecord:
+    tenant_id: str
+    plan: str
+    source_limit: int
+    api_access: bool
+    status: str
+    stripe_customer_id: str | None
+    stripe_subscription_id: str | None
+    current_period_end: str | None
+    updated_at: str
+
+
+LATEST_SCHEMA_VERSION = 12
 
 _SCHEMA_MIGRATIONS_SQLITE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -331,6 +344,30 @@ _SQLITE_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS web_login_codes_email_idx ON web_login_codes (email, created_at DESC)",
         ),
     ),
+    (
+        12,
+        "stripe_subscription_entitlements",
+        (
+            """CREATE TABLE IF NOT EXISTS billing_accounts (
+                tenant_id TEXT PRIMARY KEY REFERENCES tenants(tenant_id),
+                plan TEXT NOT NULL,
+                source_limit INTEGER NOT NULL,
+                api_access INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                stripe_customer_id TEXT UNIQUE,
+                stripe_subscription_id TEXT UNIQUE,
+                current_period_end TEXT,
+                updated_at TEXT NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS billing_events (
+                event_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                event_type TEXT NOT NULL,
+                processed_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS billing_events_tenant_idx ON billing_events (tenant_id, processed_at DESC)",
+        ),
+    ),
 )
 
 _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
@@ -520,6 +557,30 @@ _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
                 created_at TIMESTAMPTZ NOT NULL
             )""",
             "CREATE INDEX IF NOT EXISTS web_login_codes_email_idx ON web_login_codes (email, created_at DESC)",
+        ),
+    ),
+    (
+        12,
+        "stripe_subscription_entitlements",
+        (
+            """CREATE TABLE IF NOT EXISTS billing_accounts (
+                tenant_id TEXT PRIMARY KEY REFERENCES tenants(tenant_id),
+                plan TEXT NOT NULL,
+                source_limit INTEGER NOT NULL,
+                api_access BOOLEAN NOT NULL DEFAULT FALSE,
+                status TEXT NOT NULL,
+                stripe_customer_id TEXT UNIQUE,
+                stripe_subscription_id TEXT UNIQUE,
+                current_period_end TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS billing_events (
+                event_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                event_type TEXT NOT NULL,
+                processed_at TIMESTAMPTZ NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS billing_events_tenant_idx ON billing_events (tenant_id, processed_at DESC)",
         ),
     ),
 )
@@ -2329,6 +2390,162 @@ class TenantStore:
             "scheduler_heartbeat_status": heartbeat.status if heartbeat else "missing",
             "scheduler_heartbeat_age_seconds": heartbeat_age,
         }
+
+    def get_billing(self, tenant_id: str) -> BillingRecord | None:
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        sql = (
+            "SELECT tenant_id,plan,source_limit,api_access,status,stripe_customer_id,"
+            "stripe_subscription_id,current_period_end,updated_at "
+            f"FROM billing_accounts WHERE tenant_id={placeholder}"
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                row = conn.execute(sql, (tenant_id,)).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (tenant_id,))
+                    row = cur.fetchone()
+        if not row:
+            return None
+        return BillingRecord(
+            tenant_id=str(row[0]),
+            plan=str(row[1]),
+            source_limit=int(row[2]),
+            api_access=bool(row[3]),
+            status=str(row[4]),
+            stripe_customer_id=str(row[5]) if row[5] else None,
+            stripe_subscription_id=str(row[6]) if row[6] else None,
+            current_period_end=_time_text(row[7]),
+            updated_at=_time_text(row[8]) or "",
+        )
+
+    def billing_tenant_for_customer(self, customer_id: str) -> str | None:
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        sql = f"SELECT tenant_id FROM billing_accounts WHERE stripe_customer_id={placeholder}"
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                row = conn.execute(sql, (customer_id,)).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (customer_id,))
+                    row = cur.fetchone()
+        return str(row[0]) if row else None
+
+    def apply_billing_event(
+        self,
+        event_id: str,
+        event_type: str,
+        tenant_id: str,
+        *,
+        plan: str,
+        source_limit: int,
+        api_access: bool,
+        status: str,
+        stripe_customer_id: str | None,
+        stripe_subscription_id: str | None,
+        current_period_end: str | None = None,
+    ) -> bool:
+        """Apply one verified Stripe event exactly once and update entitlements."""
+        if not re.fullmatch(r"evt_[A-Za-z0-9_]+", event_id):
+            raise TenantStoreError("billing event id is invalid")
+        if not re.fullmatch(r"[a-z0-9._-]{2,64}", plan):
+            raise TenantStoreError("billing plan is invalid")
+        if source_limit < 1 or source_limit > 100:
+            raise TenantStoreError("billing source limit is invalid")
+        if status not in {
+            "pending",
+            "trialing",
+            "active",
+            "past_due",
+            "canceled",
+            "unpaid",
+            "paused",
+            "incomplete",
+            "incomplete_expired",
+        }:
+            raise TenantStoreError("billing status is invalid")
+        for value, label in (
+            (stripe_customer_id, "customer"),
+            (stripe_subscription_id, "subscription"),
+        ):
+            if value is not None and not re.fullmatch(r"[A-Za-z0-9_]+", value):
+                raise TenantStoreError(f"Stripe {label} id is invalid")
+        now = _utcnow()
+        values = (
+            tenant_id,
+            plan,
+            source_limit,
+            api_access,
+            status,
+            stripe_customer_id,
+            stripe_subscription_id,
+            current_period_end,
+            now,
+        )
+        try:
+            with self._connect() as conn:
+                if self.kind == "sqlite":
+                    conn.execute("BEGIN IMMEDIATE")
+                    if conn.execute(
+                        "SELECT 1 FROM billing_events WHERE event_id=?", (event_id,)
+                    ).fetchone():
+                        return False
+                    conn.execute(
+                        """INSERT INTO billing_accounts
+                           (tenant_id,plan,source_limit,api_access,status,stripe_customer_id,
+                            stripe_subscription_id,current_period_end,updated_at)
+                           VALUES (?,?,?,?,?,?,?,?,?)
+                           ON CONFLICT(tenant_id) DO UPDATE SET
+                             plan=excluded.plan,source_limit=excluded.source_limit,
+                             api_access=excluded.api_access,status=excluded.status,
+                             stripe_customer_id=COALESCE(excluded.stripe_customer_id,billing_accounts.stripe_customer_id),
+                             stripe_subscription_id=COALESCE(excluded.stripe_subscription_id,billing_accounts.stripe_subscription_id),
+                             current_period_end=excluded.current_period_end,updated_at=excluded.updated_at""",
+                        values,
+                    )
+                    conn.execute(
+                        "INSERT INTO billing_events (event_id,tenant_id,event_type,processed_at) VALUES (?,?,?,?)",
+                        (event_id, tenant_id, event_type, now),
+                    )
+                else:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO billing_events
+                               (event_id,tenant_id,event_type,processed_at)
+                               VALUES (%s,%s,%s,%s)
+                               ON CONFLICT(event_id) DO NOTHING
+                               RETURNING event_id""",
+                            (event_id, tenant_id, event_type, now),
+                        )
+                        if cur.fetchone() is None:
+                            return False
+                        cur.execute(
+                            """INSERT INTO billing_accounts
+                               (tenant_id,plan,source_limit,api_access,status,stripe_customer_id,
+                                stripe_subscription_id,current_period_end,updated_at)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                               ON CONFLICT(tenant_id) DO UPDATE SET
+                                 plan=EXCLUDED.plan,source_limit=EXCLUDED.source_limit,
+                                 api_access=EXCLUDED.api_access,status=EXCLUDED.status,
+                                 stripe_customer_id=COALESCE(EXCLUDED.stripe_customer_id,billing_accounts.stripe_customer_id),
+                                 stripe_subscription_id=COALESCE(EXCLUDED.stripe_subscription_id,billing_accounts.stripe_subscription_id),
+                                 current_period_end=EXCLUDED.current_period_end,updated_at=EXCLUDED.updated_at""",
+                            values,
+                        )
+                self._insert_audit(
+                    conn,
+                    tenant_id,
+                    "billing.updated",
+                    "subscription",
+                    stripe_subscription_id,
+                    actor_type="stripe_webhook",
+                    metadata={"plan": plan, "status": status, "event_type": event_type},
+                )
+            return True
+        except TenantStoreError:
+            raise
+        except Exception as error:
+            raise TenantStoreError("billing event could not be applied") from error
 
     def claim_delivery(
         self,

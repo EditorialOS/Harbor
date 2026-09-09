@@ -17,6 +17,7 @@ from mcp.server.mcpserver import Context
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 
+from .billing import billing_is_active
 from .chatgpt_ui import HARBOR_APP_HTML, HARBOR_APP_URI
 from .dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
 from .oauth import READ_SCOPE, RUN_SCOPE, Auth0TokenVerifier, OAuthConfig
@@ -109,18 +110,10 @@ def _safe_intelligence(result: dict[str, Any]) -> dict[str, Any] | None:
     safe_intelligence["headline"] = intelligence.get("headline") or result.get(
         "summary"
     )
-    safe_intelligence["strongest_open"] = _safe_post(
-        intelligence.get("best_open")
-    )
-    safe_intelligence["weakest_open"] = _safe_post(
-        intelligence.get("weakest_open")
-    )
-    safe_intelligence["strongest_click"] = _safe_post(
-        intelligence.get("best_click")
-    )
-    safe_intelligence["weakest_click"] = _safe_post(
-        intelligence.get("weakest_click")
-    )
+    safe_intelligence["strongest_open"] = _safe_post(intelligence.get("best_open"))
+    safe_intelligence["weakest_open"] = _safe_post(intelligence.get("weakest_open"))
+    safe_intelligence["strongest_click"] = _safe_post(intelligence.get("best_click"))
+    safe_intelligence["weakest_click"] = _safe_post(intelligence.get("weakest_click"))
     return {
         "metrics": {
             "publication_name": metrics.get("publication_name"),
@@ -139,7 +132,10 @@ def _dashboard_payload(store: TenantStore, tenant: TenantRecord) -> dict[str, An
     runs = store.list_runs(tenant.tenant_id, limit=10)
     latest = None
     for record in runs:
-        if record.worker_id != "newsletter-intelligence" or record.status != "completed":
+        if (
+            record.worker_id != "newsletter-intelligence"
+            or record.status != "completed"
+        ):
             continue
         safe = _safe_intelligence(record.result or {})
         if safe is not None:
@@ -341,6 +337,7 @@ def create_remote_mcp(
     def status(ctx: Context) -> dict[str, Any]:
         """Get safe status for the authenticated Harbor workspace."""
         tenant = _tenant_for_context(ctx, store)
+        billing = store.get_billing(tenant.tenant_id)
         return {
             "tenant_id": tenant.tenant_id,
             "name": tenant.name,
@@ -348,6 +345,11 @@ def create_remote_mcp(
             "sprite_provisioned": bool(tenant.sprite_name),
             "enabled_workers": tenant.config.get("workers", []),
             "outputs": tenant.config.get("outputs", ["files"]),
+            "billing": {
+                "required": bool(tenant.config.get("billing_required")),
+                "plan": billing.plan if billing else None,
+                "status": billing.status if billing else "not_configured",
+            },
             "connections": [
                 {
                     "provider": item.get("provider"),
@@ -399,6 +401,10 @@ def create_remote_mcp(
     ) -> dict[str, Any]:
         """Run one enabled worker in the authenticated tenant's private Sprite."""
         tenant = _tenant_for_context(ctx, store)
+        if tenant.config.get("billing_required") and not billing_is_active(
+            store.get_billing(tenant.tenant_id)
+        ):
+            raise PermissionError("an active Harbor plan is required")
         if idempotency_key is not None and not 1 <= len(idempotency_key) <= 255:
             raise ValueError("idempotency_key must contain 1 through 255 characters")
         if worker_id not in tenant.config.get("workers", []):

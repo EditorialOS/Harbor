@@ -25,6 +25,7 @@ except ImportError as e:  # pragma: no cover
         "Install Harbor's production dependencies to run the control plane"
     ) from e
 
+from .billing import billing_is_active
 from .dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
 from .outputs import DeliveryCoordinator, DeliveryError, validate_email_recipient
 from .remote_mcp import create_remote_mcp
@@ -391,6 +392,7 @@ def attach_connection(tenant_id: str, req: ConnectionAttach):
 def tenant_status(tenant_id: str, authorization: str | None = Header(default=None)):
     _tenant_auth(tenant_id, authorization)
     record = store.get(tenant_id)
+    billing = store.get_billing(tenant_id)
     schedule_state = {
         worker_id: store.get_schedule_state(tenant_id, worker_id)
         for worker_id in record.config.get("schedule", {})
@@ -434,6 +436,11 @@ def tenant_status(tenant_id: str, authorization: str | None = Header(default=Non
             }
             for c in record.config.get("connections", [])
         ],
+        "billing": {
+            "required": bool(record.config.get("billing_required")),
+            "plan": billing.plan if billing else None,
+            "status": billing.status if billing else "not_configured",
+        },
     }
 
 
@@ -526,6 +533,10 @@ def run_worker_remote(
             detail="this worker does not accept remote run input fields",
         )
     record = store.get(tenant_id)
+    if record.config.get("billing_required") and not billing_is_active(
+        store.get_billing(tenant_id)
+    ):
+        raise HTTPException(status_code=402, detail="an active Harbor plan is required")
     if worker_id not in record.config.get("workers", []):
         raise HTTPException(status_code=403, detail="worker not enabled")
     if not record.sprite_name:
