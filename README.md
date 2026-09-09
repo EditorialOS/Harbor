@@ -1,50 +1,70 @@
-# Harbor — v0.9.0 production alpha
+# Harbor
 
-Harbor is a multi-tenant AI worker platform. The production target is now explicit:
+Harbor is a multi-tenant AI worker platform. A customer creates a workspace,
+connects a service, enables a worker, and receives useful work on a schedule.
+They do not operate Python, cron, JSON, SSH, or infrastructure.
 
-- **Fly Machine** = Harbor control plane.
-- **Fly Sprite** = one persistent customer computer per tenant.
-- **Fly Connectors** = provider credentials without handing raw keys to worker code.
-- **Postgres** = Harbor product state.
-- **Workers** = installable capabilities inside the tenant Sprite.
+Newsletter Intelligence is Harbor's first runnable worker. It reads real
+beehiiv performance data and produces an editorial brief covering what changed,
+why it matters, trends, strongest and weakest content, audience signals,
+recommended actions, and anomalies. Alex remains a separate, non-runnable
+worker until its v3 reconciliation is complete.
 
-Newsletter Intelligence is worker #1. Alex remains worker #2 and is intentionally blocked until the supplied v3 reconciliation work is complete.
+## Architecture
 
-## What changed from v0.8
+- Harbor's control plane and scheduler run on Fly Machines.
+- Postgres is the production system of record.
+- Every tenant gets one persistent, private Fly Sprite for worker execution.
+- Fly Connectors hold provider credentials and proxy approved API requests.
+- ChatGPT, web, email, MCP, and future surfaces are adapters over the same core.
 
-- added Fly Machine deployment files (`Dockerfile`, `fly.toml`);
-- added Postgres/SQLite tenant store and hashed tenant API keys;
-- added production HTTP control plane;
-- added programmatic Sprite provisioning;
-- added runtime wheel upload/install into each tenant Sprite;
-- added non-secret Sprite run contract;
-- added Fly Connector-compatible beehiiv path;
-- removed implicit mock fallback from production;
-- added run idempotency state;
-- rewrote deployment/product plan around real multi-tenant infrastructure.
+Provider credentials are never stored in Harbor's source, Postgres, tenant
+configuration, run specs, reports, logs, or Sprite files. Production failures
+are visible and durable; there is no automatic sample-data fallback.
 
-Start with `docs/PRODUCTION_PLAN.md`, then `DEPLOY.md`, then `CODEX_NEXT.md`.
+## Current release
 
-## Local tests
+`1.0.0-rc.1` is a release candidate, not a production-ready declaration. The
+pilot flow has been executed on Fly with Postgres, two isolated Sprites, a real
+beehiiv connector, scheduled runs, persisted reports, email delivery, and an
+OAuth-authenticated ChatGPT app. See `docs/LIVE_ACCEPTANCE_EVIDENCE.md` for
+sanitized evidence and `docs/KNOWN_LIMITATIONS.md` for the remaining launch
+gates.
 
-The only test path allowed to use sample beehiiv data is explicit mock mode.
+## Local development
+
+Python 3.10 or newer is required.
 
 ```bash
-python3 -m pip install -e ".[test]"
-python3 -m pytest -q
+python3 -m venv .venv
+.venv/bin/pip install -e ".[test,production]"
+.venv/bin/pytest -q
 ```
 
-Postgres store tests run when `TEST_DATABASE_URL` points to an isolated test
-database. CI supplies an ephemeral PostgreSQL service automatically.
+SQLite is used only for local development. Production startup requires
+`DATABASE_URL` and uses ordered Postgres migrations. Explicit mock mode is
+limited to tests and local development.
 
-## Production boundary
+## Product surfaces
 
-This alpha now has verified live-pilot evidence for its Fly control plane,
-Postgres state, tenant Sprite, restricted beehiiv connector, and unattended
-scheduled execution. A real report has also been delivered through the email
-adapter, and a second live tenant has proven API, MCP, run, file, Sprite, and
-connector-policy isolation. An authenticated web workspace now exposes
-provisioning state, connection setup, scheduling, output settings, run controls,
-and run history. It is not beta or production-ready: a custom sender domain,
-alert routing, fully product-owned connector authorization, and ChatGPT OAuth
-onboarding remain gates.
+- Web: passwordless signup, workspace provisioning, source connection,
+  scheduling, email delivery, run history, billing, and service status.
+- MCP/ChatGPT: authenticated status, worker catalog, latest intelligence,
+  sources, recommendations, recent runs, and idempotent worker execution.
+- Email: durable, idempotent HTML and plain-text report delivery.
+- HTTP API: tenant-scoped product operations and operator provisioning.
+
+## Documentation
+
+- `docs/CUSTOMER_ONBOARDING.md` — customer setup
+- `DEPLOY.md` — production deployment
+- `docs/OPERATOR_RUNBOOK.md` — normal operations and incident response
+- `docs/LAUNCH_CHECKLIST.md` — release gates
+- `docs/CHATGPT_SUBMISSION_CHECKLIST.md` — public app submission
+- `docs/KNOWN_LIMITATIONS.md` — explicit boundaries
+- `docs/SPRITES_LIVE_VERIFICATION.md` — Sprite acceptance checklist
+- `docs/PRODUCTION_PLAN.md` — fixed product architecture
+
+Do not enable public paid signup until Stripe, a verified email-sending domain,
+external alerts, final legal terms, and the remaining live acceptance checks are
+configured and verified.

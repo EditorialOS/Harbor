@@ -1,220 +1,148 @@
-# Harbor — Fly production deployment
+# Harbor production deployment
 
-This release targets Fly Machines for the Harbor control plane and Fly Sprites for tenant worker computers.
+Harbor runs one HTTP control-plane Machine and one scheduler Machine on Fly.
+Postgres is the system of record, and each tenant receives a persistent Fly
+Sprite. The same image contains the exact runtime wheel installed in Sprites.
 
-## 0. Prerequisites
+This document deliberately names settings, not their values. Never put a
+secret in source, a command transcript, an issue, a report, tenant config, or a
+Sprite file.
 
-You need:
+## External prerequisites
 
-- a Fly.io organization;
-- `flyctl` authenticated;
-- Sprites enabled for the organization;
-- a Sprites API token;
-- a Postgres database;
-- one real beehiiv publication for the pilot;
-- a Fly Custom API Connector for that beehiiv account.
+- Fly organization, authenticated `flyctl`, and Sprites enabled
+- Sprites organization token
+- production Postgres connection with TLS (Fly Managed Postgres or another
+  supported hosted Postgres; the current pilot uses Supabase)
+- Auth0 tenant, API audience, and regular web application for MCP OAuth
+- Resend account and verified sending domain
+- Stripe account with three recurring monthly prices, portal, and webhook
+- monitored alert destination
 
-The build can be prepared without these credentials, but a live deployment cannot be completed without them.
+## Runtime settings
 
-## 1. Create the Fly app
+Set secrets through `fly secrets set -a <app>` or the Fly dashboard. Do not
+commit a `.env` file.
 
-Do not embed an app name in source.
+Required platform secrets:
 
-```bash
-export HARBOR_FLY_APP="your-harbor-app-name"
-fly launch --no-deploy --name "$HARBOR_FLY_APP"
-```
+| Setting | Purpose |
+| --- | --- |
+| `DATABASE_URL` | TLS Postgres connection string |
+| `SPRITE_TOKEN` | Create and operate tenant Sprites |
+| `HARBOR_ADMIN_TOKEN` | Operator-only API authorization |
+| `RESEND_API_KEY` | Passwordless login and report email |
 
-Keep the generated/selected region as deployment configuration rather than tenant source code.
+Required production configuration:
 
-## 2. Postgres
+| Setting | Value or purpose |
+| --- | --- |
+| `HARBOR_PUBLIC_URL` | Public HTTPS origin, without `/mcp` |
+| `HARBOR_EMAIL_FROM` | Sender on the verified Resend domain |
+| `HARBOR_SUPPORT_EMAIL` | Public support address shown on `/support` |
+| `HARBOR_MCP_OAUTH_REQUIRED` | `true` |
+| `HARBOR_MCP_RESOURCE` | Exact public MCP resource URL, without a trailing slash |
+| `HARBOR_OAUTH_AUDIENCE` | Same Auth0 API identifier as the MCP resource |
+| `HARBOR_OAUTH_ISSUER` | Auth0 tenant HTTPS origin with trailing slash |
 
-Provision/attach Postgres and set `DATABASE_URL` on the app. Harbor uses SQLite only for local development.
-Harbor applies versioned migrations at control-plane startup and aborts startup
-if a migration fails. Back up Postgres before deploying a release with a new
-migration; see `docs/DATABASE_MIGRATIONS.md`.
+Billing stays disabled until every Stripe item below has been verified. Existing
+non-billed pilot workspaces remain usable while `HARBOR_BILLING_REQUIRED` is
+false.
 
-## 3. Platform secrets
+| Setting | Purpose |
+| --- | --- |
+| `STRIPE_SECRET_KEY` | Stripe secret-mode API key |
+| `STRIPE_WEBHOOK_SECRET` | Signing secret for this endpoint only |
+| `STRIPE_PRICE_STARTER` | $29/month recurring Price id |
+| `STRIPE_PRICE_GROWTH` | $79/month recurring Price id |
+| `STRIPE_PRICE_SCALE` | $199/month recurring Price id |
+| `HARBOR_BILLING_REQUIRED` | Set `true` only after the test purchase gate passes |
 
-Generate a high-entropy admin token and add the Sprites token as Fly app secrets:
+OpenAI may issue a domain-verification token during public plugin submission.
+Set that exact value as `HARBOR_OPENAI_APPS_CHALLENGE`, verify the well-known
+endpoint, then leave it in runtime configuration for the reviewed version.
 
-```bash
-fly secrets set \
-  HARBOR_ADMIN_TOKEN='...' \
-  SPRITE_TOKEN='...' \
-  DATABASE_URL='postgresql://...' \
-  -a "$HARBOR_FLY_APP"
-```
+## Release procedure
 
-Do not place customer beehiiv credentials in Fly app secrets. Fly app secrets are app-wide, not tenant connection state.
+1. Confirm the launch checklist identifies every unfulfilled external gate.
+2. Back up Postgres and record the restore point.
+3. Run the complete tests and build checks:
 
-## 4. Deploy control plane
+   ```bash
+   .venv/bin/pytest -q
+   .venv/bin/python -m build
+   docker build -t harbor-release-check .
+   ```
 
-The Fly configuration defines two process groups: `app` for the HTTP control
-plane and `scheduler` for durable scheduled dispatch. Fly runs each group on a
-separate Machine. Review the added Machine cost before deploying this release.
+4. Confirm the intended revision is committed and the Git worktree is clean.
+5. Deploy the same revision to the existing Fly app:
 
-```bash
-fly deploy -a "$HARBOR_FLY_APP"
-```
+   ```bash
+   flyctl deploy --app <app-name> --remote-only
+   ```
 
-Verify:
+6. Confirm both process groups are healthy, then verify:
 
-```bash
-curl "https://$HARBOR_FLY_APP.fly.dev/readyz"
-curl "https://$HARBOR_FLY_APP.fly.dev/metrics"
-```
+   ```bash
+   curl -fsS https://<app-name>.fly.dev/healthz
+   curl -fsS https://<app-name>.fly.dev/readyz
+   curl -fsS https://<app-name>.fly.dev/status
+   curl -fsS https://<app-name>.fly.dev/metrics
+   curl -fsS https://<app-name>.fly.dev/privacy
+   curl -fsS https://<app-name>.fly.dev/terms
+   curl -fsS https://<app-name>.fly.dev/support
+   ```
 
-`/readyz` fails when Postgres is unavailable or its schema is not current. Fly
-scrapes `/metrics` for aggregate control-plane and scheduler health. The metrics
-contain no tenant identifiers. Configure alert rules and an external contact
-point separately; metrics collection alone does not notify an operator.
+7. Confirm an unauthenticated MCP call is rejected, then run an authenticated
+   MCP read and one approved worker execution through ChatGPT.
+8. Confirm the scheduler heartbeat remains healthy and the resulting run,
+   report, and delivery are durable.
 
-## 5. Create pilot tenant
+Readiness must report the code's current schema version. Migrations are ordered,
+transactional, and protected by a Postgres advisory lock. Never bypass a failed
+migration. See `docs/DATABASE_MIGRATIONS.md`.
 
-Use the admin API. The tenant API key is returned once and should be stored in the customer's account/session system. Harbor stores only its hash.
+## Stripe configuration and verification
 
-```bash
-curl -X POST "https://$HARBOR_FLY_APP.fly.dev/v1/tenants" \
-  -H "Authorization: Bearer $HARBOR_ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tenant_id": "pilot",
-    "name": "Pilot Newsletter",
-    "timezone": "America/Los_Angeles",
-    "workers": ["newsletter-intelligence"],
-    "schedule": {"newsletter-intelligence": {"hour": 6, "minute": 0}},
-    "outputs": ["files"]
-  }'
-```
+Create three Stripe products/prices matching the published tiers: Starter at
+$29/month, Growth at $79/month, and Scale at $199/month. Configure the hosted
+Customer Portal. Register `https://<app-name>.fly.dev/stripe/webhook` and select:
 
-## 6. Provision tenant Sprite
+- `checkout.session.completed`
+- `checkout.session.async_payment_succeeded`
+- `checkout.session.async_payment_failed`
+- `customer.subscription.created`
+- `customer.subscription.updated`
+- `customer.subscription.deleted`
 
-```bash
-curl -X POST "https://$HARBOR_FLY_APP.fly.dev/v1/tenants/pilot/provision-sprite" \
-  -H "Authorization: Bearer $HARBOR_ADMIN_TOKEN"
-```
+Use Stripe test mode first. Complete Checkout as a new customer, confirm the
+signed webhook activates the workspace and provisions exactly one Sprite, open
+the hosted portal, cancel, and confirm new scheduled/manual/MCP runs are blocked
+while history remains visible. Only then configure live-mode ids/secrets and set
+`HARBOR_BILLING_REQUIRED=true`.
 
-Harbor creates the Sprite, uploads the exact runtime wheel built into the control-plane release, installs it, creates the persistent workspace, and attempts a checkpoint.
+Do not advertise the Growth or Scale source limits until the multi-source
+product flow has passed its own live acceptance test.
 
-## 7. Connect beehiiv
+## Customer onboarding behavior
 
-In Fly Sprites Connectors, create a Custom API connection for the pilot account:
+The customer starts at `/signup`, verifies a one-time email code, chooses their
+workspace name, time zone, schedule, and delivery email, then completes Stripe
+Checkout when billing is enabled. Harbor provisions the Sprite. The customer
+pastes the Beehiiv key into Harbor's password field; Harbor passes it directly
+to Fly Connectors and persists only non-secret connector metadata.
 
-- base URL: beehiiv v2 API;
-- credential: the pilot beehiiv API token;
-- auth location/prefix matching beehiiv's Bearer token;
-- access policy restricted to the pilot Sprite;
-- optionally restrict allowed endpoints to the publication/posts endpoints Harbor uses.
+No customer needs `flyctl`, JSON, SSH, Python, or Sprite access. The older admin
+tenant/invitation APIs remain operator recovery tools, not the normal path.
 
-Copy the connector's non-secret gateway base URL/id. Attach that metadata to Harbor together with the publication id:
+## Rollback and recovery
 
-```bash
-curl -X POST "https://$HARBOR_FLY_APP.fly.dev/v1/tenants/pilot/connections" \
-  -H "Authorization: Bearer $HARBOR_ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "provider": "beehiiv",
-    "id": "<connector-id>",
-    "gateway_base_url": "<gateway-base-url>",
-    "settings": {"publication_id": "<real-publication-id>", "recent_posts": 5}
-  }'
-```
+- Roll back the Fly image only to a revision compatible with the current schema.
+- Do not reverse a migration by editing schema-version state.
+- Preserve failed run, delivery, billing-event, and audit rows for diagnosis.
+- Restore Postgres only from a documented provider restore point after
+  preserving the current database and confirming the incident scope.
+- Never reuse one tenant's connector or Sprite as a recovery shortcut.
 
-The raw beehiiv credential is never sent to this Harbor endpoint.
-
-## 8. Run one live worker
-
-```bash
-curl -X POST "https://$HARBOR_FLY_APP.fly.dev/v1/tenants/pilot/workers/newsletter-intelligence/run" \
-  -H "Authorization: Bearer $PILOT_HARBOR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"input": {}, "idempotency_key": "pilot-first-live-run"}'
-```
-
-A successful production result must not contain mock data.
-
-## 9. Configure and verify scheduling
-
-The tenant can update its worker schedule without source changes. Hours and
-minutes are interpreted in the supplied IANA time zone:
-
-```bash
-curl -X PUT "https://$HARBOR_FLY_APP.fly.dev/v1/tenants/pilot/workers/newsletter-intelligence/schedule" \
-  -H "Authorization: Bearer $PILOT_HARBOR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"hour": 6, "minute": 0, "timezone": "America/Los_Angeles"}'
-```
-
-The response includes `next_run_at`. Tenant status exposes the durable next/last
-schedule state. The scheduler derives one stable idempotency key per local-date
-window, uses bounded retries, and advances directly to the next future window
-after downtime.
-
-## 10. What remains before broader customer use
-
-- a custom verified email-sending domain for recipients beyond the provider
-  account owner;
-- alert rules and an external alert destination for the implemented metrics;
-- product-owned connector authorization when Fly provides a supported
-  connector-management API (the current guided flow hands off to Fly's UI);
-- OAuth onboarding for ChatGPT clients that cannot supply custom headers.
-
-## Web onboarding
-
-An operator creates a short-lived invitation through the admin API. The
-one-time invitation code is returned once and only its SHA-256 hash is stored.
-Deliver the code out of band; do not put it in a URL, log, or source file.
-
-```bash
-curl -X POST "https://$HARBOR_FLY_APP.fly.dev/v1/onboarding/invitations" \
-  -H "Authorization: Bearer $HARBOR_ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"email":"owner@example.com","expires_in_hours":24}'
-```
-
-The invited customer visits `/onboarding`, enters the invitation code, chooses
-the workspace name, time zone, schedule, and email output, and Harbor creates
-the tenant plus its private Sprite. The workspace ID and Harbor access key are
-shown once. `/login` exchanges that key for a 30-day server-side session whose
-token is stored only as a hash.
-
-## Email output
-
-Harbor's first output adapter uses Resend. Store `RESEND_API_KEY` as a Fly app
-secret and configure `HARBOR_EMAIL_FROM` as deployment state only after the
-sender address or domain is verified with the provider. Never put the provider
-key in a tenant request.
-
-Enable email for a tenant through its authenticated API:
-
-```bash
-curl -X PUT "https://$HARBOR_FLY_APP.fly.dev/v1/tenants/pilot/outputs/email" \
-  -H "Authorization: Bearer $PILOT_HARBOR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"enabled":true,"recipients":["owner@example.com"],"subject_prefix":"Harbor Morning Intelligence"}'
-```
-
-The next completed worker run reads only its fixed Sprite report path, sends
-both HTML and text, and persists a delivery record. Retries reuse the same
-provider idempotency key.
-
-For an initial operator-only test without a custom domain, Resend's testing
-sender can deliver only to the email address registered to that Resend account.
-Do not represent that restricted sender as general customer email delivery.
-
-## Remote MCP
-
-The production Streamable HTTP endpoint is:
-
-```text
-https://<harbor-app>.fly.dev/mcp/
-```
-
-Clients that support custom headers authenticate with the tenant's Harbor key
-as an HTTP bearer token. MCP tools never accept a tenant id, tenant config path,
-or filesystem path. ChatGPT end-user installation still requires a proper OAuth
-authorization flow and must not be represented as complete until that flow is
-implemented and tested.
-
-See `CODEX_NEXT.md` and `docs/PRODUCTION_PLAN.md`.
+Operational response is in `docs/OPERATOR_RUNBOOK.md`; all release gates are in
+`docs/LAUNCH_CHECKLIST.md`.

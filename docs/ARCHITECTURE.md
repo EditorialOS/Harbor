@@ -1,4 +1,4 @@
-# Harbor v0.9 architecture
+# Harbor v1 architecture
 
 Harbor is a multi-tenant AI worker platform. The production deployment uses a trusted Fly Machine control plane and isolated Fly Sprite computers for tenant execution.
 

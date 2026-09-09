@@ -1,120 +1,67 @@
-# Build status — v0.9.0-production-alpha
+# Build status — Harbor 1.0.0 release candidate 1
 
-## Implemented in this slice
+Harbor's first commercial product loop is implemented. This is a release
+candidate, not a production-ready declaration; remaining gates require external
+account configuration or a second customer's real data.
 
-- Production architecture changed to Fly Machine control plane + per-tenant Fly Sprite execution.
-- Fly deployment configuration and production Docker image.
-- Postgres production tenant store with SQLite local mode.
-- Hashed tenant API keys.
-- Run idempotency records.
-- Official `sprites-py` lifecycle, paginated listing, filesystem, exec, and
-  checkpoint paths behind Harbor's infrastructure adapter.
-- Programmatic tenant Sprite provisioning.
-- Runtime wheel is uploaded from the control-plane release into the Sprite; no per-customer source edits.
-- Persistent `/workspace` creation and a required successful post-install
-  checkpoint.
-- Non-secret run spec and in-Sprite worker entrypoint.
-- Newsletter Intelligence can call beehiiv through a Fly Connector gateway.
-- Implicit fake-data fallback removed; mock mode is explicit test-only behavior.
-- Product/deployment/Codex plans rewritten around real infrastructure.
+## Implemented and locally verified
 
-## Tenant-store hardening completed after the alpha handoff
+- Multi-tenant Fly control plane and durable scheduler with Postgres as the
+  system of record
+- one persistent Fly Sprite per tenant, programmatically provisioned with the
+  exact released Harbor runtime
+- tenant-restricted Fly Custom API Connectors; no raw provider credential enters
+  Harbor state, run specs, logs, reports, or Sprite files
+- Newsletter Intelligence using real Beehiiv data, comparative baselines,
+  strongest/weakest content, audience/growth signals, anomalies, and actions
+- durable tenant/worker-scoped idempotency, bounded retries, expiring leases,
+  failed-state persistence, and idempotent report delivery
+- passwordless self-service web onboarding, schedule/time-zone controls, email
+  settings, source connection, workspace status, runs, and activity audit
+- authenticated remote MCP plus a custom ChatGPT UI for latest intelligence,
+  sources, workers, recommendations, runs, connection state, and approved runs
+- Auth0 OAuth with the authenticated user mapped to exactly one Harbor tenant
+- health, readiness, aggregate metrics, public status, security headers, and
+  pre-launch privacy, terms, and support pages
+- Stripe hosted Checkout and portal, signed/idempotent webhooks, plan
+  entitlements, payment gating, cancellation gating, and deferred provisioning
+- current customer, operator, deployment, release, limitation, launch, and
+  ChatGPT submission documentation
 
-- Ordered transactional schema migrations with a Postgres startup lock.
-- Tenant/worker-scoped run idempotency instead of one global key namespace.
-- Store-owned tenant configuration and connector metadata updates.
-- Tenant-scoped audit log for tenant, connection, Sprite, and run state changes.
-- Secret-shaped metadata is rejected before it reaches database state or run specs.
-- Inactive tenant keys no longer authenticate.
-- Production/Fly startup fails if `DATABASE_URL` is absent.
-- SQLite migration tests and a real ephemeral-Postgres CI job.
-- Runtime wheel packaging and the Fly control-plane Docker image now build.
-- Sprite wheel upload preserves the valid wheel filename; checkpoint failure is visible.
-- Sprite run specs now use a Harbor-generated run id, a unique internal path,
-  and mode-0600 permissions; the same run id reaches worker artifacts.
+## Live evidence already established
 
-## Live pilot evidence completed
+- Fly HTTP and scheduler Machines are running against production Postgres
+- the pilot Sprite passed install, checkpoint, cold-wake, persistence, and real
+  worker reconciliation checks
+- a real policy-restricted Beehiiv connector returned customer data only inside
+  the pilot Sprite
+- a scheduled real-data report completed, persisted, and arrived by email
+- Auth0 OAuth connected the Harbor developer-mode ChatGPT app, and Harbor tools
+  resolved the workspace from the signed-in user
+- a second tenant received a different key, Sprite, run history, and filesystem;
+  cross-tenant HTTP access failed and its attempt to use the pilot connector was
+  denied by Fly
 
-- The Fly control plane is deployed against production Postgres state.
-- Harbor provisioned and verified a persistent tenant Sprite through the live
-  Sprites API, including wheel installation, command behavior, checkpointing,
-  cold wake, and persistent workspace files.
-- A policy-restricted Fly Custom API Connector was verified from inside that
-  tenant Sprite against a real beehiiv publication.
-- Newsletter Intelligence completed a real, zero-mock run; the Postgres run,
-  Sprite run artifact, and report artifact were reconciled by run id and hash.
-- A sanitized regression fixture preserves the verified beehiiv response shape
-  without retaining customer content or credentials.
+Sanitized identifiers and results are recorded in
+`docs/LIVE_ACCEPTANCE_EVIDENCE.md`.
 
-## Scheduler and unattended live execution completed
+## External gates still open
 
-- A dedicated Fly process group discovers tenant schedules from Postgres.
-- Schedule state persists next run, last run, status, attempts, and errors.
-- Schedule-window idempotency prevents duplicate dispatch.
-- Retries are bounded and reuse one run id and report artifact.
-- Tenant time-zone changes are validated and updated through the authenticated
-  control-plane API; customer-specific values remain database state.
-- Long outages execute at most one overdue window rather than creating a
-  backlog storm.
-- The dedicated scheduler Machine is deployed and a real scheduled beehiiv
-  pull completed without operator intervention.
-- Expiring run leases let a restarted scheduler reclaim an interrupted run
-  without changing its run id or delivery idempotency key.
+- configure Stripe products, prices, portal, and webhook; pass a real test-mode
+  purchase and cancellation before enabling paid signup
+- verify a Resend sending domain and deliver to a customer address other than the
+  provider account owner
+- connect the second tenant's own source and complete its real report/delivery
+- configure and fire external alert rules against Harbor metrics
+- rehearse a production database backup and restore
+- replace legal placeholders with approved publisher identity, policies,
+  cancellation/refund terms, and public support details
+- pass the public OpenAI plugin review checklist and publish after approval
 
-## Output and product surfaces implemented
+## Deliberately unavailable
 
-- Email delivery renders the Sprite report as escaped HTML and plain text.
-- Delivery claims, attempts, provider receipt ids, failures, and deduplication
-  are durable Postgres state; recipients remain tenant runtime metadata.
-- The email provider credential is accepted only from the control-plane secret
-  environment and is never included in run specs, tenant state, or reports.
-- A stateless Streamable HTTP MCP endpoint is mounted at `/mcp`, authenticates
-  tenant bearer keys before parsing MCP requests, and resolves tenant identity
-  from the credential rather than a tool argument.
-- MCP exposes worker catalog, safe tenant status, enabled workers, recent runs,
-  and idempotent worker execution. Its schemas expose no tenant-config or
-  filesystem-path parameter.
-- An invite-gated web surface creates a workspace, automatically provisions its
-  Sprite, and creates hashed browser sessions. Invitation and session tokens
-  are stored only as hashes.
-- The tenant-derived web workspace shows provisioning, connector health,
-  schedule, email settings, and recent runs, and can trigger an idempotent run.
-- Web forms use secure HttpOnly cookies, CSRF validation, no-cache/security
-  headers, and never accept provider credentials or filesystem paths.
+- Growth and Scale are not to be sold until multi-source behavior is live-tested
+- customer self-service data export/deletion is not implemented
+- Alex remains non-runnable until its v3 reconciliation
 
-## Live email and tenant-isolation evidence completed
-
-- A real Resend account is configured through Fly secrets, and a completed live
-  beehiiv report was delivered and visibly rendered in the pilot inbox.
-- The delivery receipt, attempt count, and completed run are durable Postgres
-  state; the provider secret is absent from tenant state, run state, and the
-  Sprite report.
-- A second tenant was created through the same API and Harbor automatically
-  provisioned a distinct persistent Sprite with the current runtime.
-- Cross-tenant HTTP authentication returned 401 in both directions, and the
-  remote MCP surface resolved the second tenant only from its own bearer key.
-- The two tenants exposed disjoint run histories and workspace files.
-- The pilot Sprite received HTTP 200 through its beehiiv connector while the
-  second tenant Sprite received HTTP 403 for that same connector gateway,
-  proving the live Fly Connector policy boundary.
-
-## Still required before commercial launch
-
-- Verify a custom email-sending domain before delivering to addresses other
-  than the Resend account owner. The current testing sender is intentionally
-  limited to the verified account address.
-- Configure an external alert destination and alert rules for Harbor's live
-  Prometheus metrics. Database-aware readiness, aggregate run/delivery counts,
-  overdue schedules, expired leases, and the durable scheduler heartbeat are
-  implemented and live.
-- Replace the current guided Fly-dashboard connector handoff when Fly exposes a
-  documented supported connector-management API suitable for Harbor. The
-  current official flow requires connector creation/access policy in Fly's UI.
-- OAuth-based end-user onboarding for ChatGPT; direct bearer-authenticated MCP
-  is available to clients that support custom authorization headers.
-
-## Deliberately not faked
-
-- No customer API key is embedded as an example production secret.
-- No fake production metrics are returned when a live connector is absent.
-- Alex v3 is still not marked runnable until the documented reconciliation is completed.
+The authoritative remaining release gates are in `docs/LAUNCH_CHECKLIST.md`.
