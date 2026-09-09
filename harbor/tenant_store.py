@@ -117,7 +117,7 @@ class WebSession:
     created_at: str
 
 
-LATEST_SCHEMA_VERSION = 10
+LATEST_SCHEMA_VERSION = 11
 
 _SCHEMA_MIGRATIONS_SQLITE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -314,6 +314,23 @@ _SQLITE_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
             "CREATE INDEX IF NOT EXISTS oauth_identities_tenant_idx ON oauth_identities (tenant_id)",
         ),
     ),
+    (
+        11,
+        "passwordless_web_login",
+        (
+            "CREATE INDEX IF NOT EXISTS workspace_owners_email_idx ON workspace_owners (LOWER(email))",
+            """CREATE TABLE IF NOT EXISTS web_login_codes (
+                code_id TEXT PRIMARY KEY,
+                code_hash TEXT NOT NULL UNIQUE,
+                email TEXT NOT NULL,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                expires_at TEXT NOT NULL,
+                consumed_at TEXT,
+                created_at TEXT NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS web_login_codes_email_idx ON web_login_codes (email, created_at DESC)",
+        ),
+    ),
 )
 
 _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
@@ -486,6 +503,23 @@ _POSTGRES_MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
                 PRIMARY KEY (issuer, subject)
             )""",
             "CREATE INDEX IF NOT EXISTS oauth_identities_tenant_idx ON oauth_identities (tenant_id)",
+        ),
+    ),
+    (
+        11,
+        "passwordless_web_login",
+        (
+            "CREATE INDEX IF NOT EXISTS workspace_owners_email_idx ON workspace_owners (LOWER(email))",
+            """CREATE TABLE IF NOT EXISTS web_login_codes (
+                code_id TEXT PRIMARY KEY,
+                code_hash TEXT NOT NULL UNIQUE,
+                email TEXT NOT NULL,
+                tenant_id TEXT NOT NULL REFERENCES tenants(tenant_id),
+                expires_at TIMESTAMPTZ NOT NULL,
+                consumed_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL
+            )""",
+            "CREATE INDEX IF NOT EXISTS web_login_codes_email_idx ON web_login_codes (email, created_at DESC)",
         ),
     ),
 )
@@ -1029,6 +1063,138 @@ class TenantStore:
                     cur.execute(sql, (tenant_id,))
                     row = cur.fetchone()
         return str(row[0]) if row else None
+
+    def owner_tenant_for_email(self, email: str) -> TenantRecord | None:
+        normalized_email = email.strip().lower()
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        active_predicate = "t.active=1" if self.kind == "sqlite" else "t.active=TRUE"
+        sql = (
+            "SELECT o.tenant_id FROM workspace_owners o "
+            "JOIN tenants t ON t.tenant_id=o.tenant_id "
+            f"WHERE LOWER(o.email)={placeholder} AND {active_predicate}"
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                rows = conn.execute(sql, (normalized_email,)).fetchall()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (normalized_email,))
+                    rows = cur.fetchall()
+        tenant_ids = sorted({str(row[0]) for row in rows})
+        if not tenant_ids:
+            return None
+        if len(tenant_ids) != 1:
+            raise TenantStoreError("email matches more than one Harbor workspace")
+        return self.get(tenant_ids[0])
+
+    def create_web_login_code(
+        self, email: str, *, expires_in_minutes: int = 15
+    ) -> tuple[str, str]:
+        """Issue a short-lived email code while persisting only its hash."""
+        normalized_email = email.strip().lower()
+        tenant = self.owner_tenant_for_email(normalized_email)
+        if tenant is None:
+            raise TenantStoreError("email does not match a Harbor workspace")
+        if expires_in_minutes < 5 or expires_in_minutes > 60:
+            raise TenantStoreError("login code lifetime is invalid")
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        code = "".join(secrets.choice(alphabet) for _ in range(10))
+        code_id = "login_" + secrets.token_hex(16)
+        now = dt.datetime.now(dt.timezone.utc)
+        expires_at = now + dt.timedelta(minutes=expires_in_minutes)
+        values = (
+            code_id,
+            _hash_key(code),
+            normalized_email,
+            tenant.tenant_id,
+            expires_at.isoformat(),
+            now.isoformat(),
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                conn.execute(
+                    "UPDATE web_login_codes SET consumed_at=? WHERE tenant_id=? AND consumed_at IS NULL",
+                    (now.isoformat(), tenant.tenant_id),
+                )
+                conn.execute(
+                    """INSERT INTO web_login_codes
+                       (code_id,code_hash,email,tenant_id,expires_at,created_at)
+                       VALUES (?,?,?,?,?,?)""",
+                    values,
+                )
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE web_login_codes SET consumed_at=%s WHERE tenant_id=%s AND consumed_at IS NULL",
+                        (now.isoformat(), tenant.tenant_id),
+                    )
+                    cur.execute(
+                        """INSERT INTO web_login_codes
+                           (code_id,code_hash,email,tenant_id,expires_at,created_at)
+                           VALUES (%s,%s,%s,%s,%s,%s)""",
+                        values,
+                    )
+            self._insert_audit(
+                conn,
+                tenant.tenant_id,
+                "web.login_code.issued",
+                "web_login_code",
+                code_id,
+                actor_type="web_auth",
+            )
+        return code_id, code
+
+    def redeem_web_login_code(self, email: str, code: str) -> TenantRecord:
+        normalized_email = email.strip().lower()
+        normalized_code = code.strip().upper()
+        placeholder = "?" if self.kind == "sqlite" else "%s"
+        sql = (
+            "SELECT code_id,tenant_id,expires_at,consumed_at FROM web_login_codes "
+            f"WHERE email={placeholder} AND code_hash={placeholder}"
+        )
+        if self.kind == "postgres":
+            sql += " FOR UPDATE"
+        now = dt.datetime.now(dt.timezone.utc)
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    sql, (normalized_email, _hash_key(normalized_code))
+                ).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (normalized_email, _hash_key(normalized_code)))
+                    row = cur.fetchone()
+            if not row or row[3] is not None:
+                raise TenantStoreError("login code is invalid or expired")
+            expires_at = dt.datetime.fromisoformat(_time_text(row[2]) or "")
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=dt.timezone.utc)
+            if expires_at <= now:
+                raise TenantStoreError("login code is invalid or expired")
+            if self.kind == "sqlite":
+                updated = conn.execute(
+                    "UPDATE web_login_codes SET consumed_at=? WHERE code_id=? AND consumed_at IS NULL",
+                    (now.isoformat(), row[0]),
+                ).rowcount
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE web_login_codes SET consumed_at=%s WHERE code_id=%s AND consumed_at IS NULL",
+                        (now.isoformat(), row[0]),
+                    )
+                    updated = cur.rowcount
+            if updated != 1:
+                raise TenantStoreError("login code is invalid or expired")
+            self._insert_audit(
+                conn,
+                str(row[1]),
+                "web.login.succeeded",
+                "web_login_code",
+                str(row[0]),
+                actor_type="web_auth",
+            )
+        return self.get(str(row[1]))
 
     def set_workspace_owner(
         self,

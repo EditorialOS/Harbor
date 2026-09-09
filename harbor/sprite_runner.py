@@ -113,6 +113,20 @@ class SpriteRunner:
                 f"connection probe returned non-JSON output: {output[:1000]!r}"
             ) from e
 
+    def create_beehiiv_connector(
+        self, sprite_name: str, api_key: str
+    ) -> dict[str, Any]:
+        """Pass a Beehiiv credential directly to Fly's encrypted connector store."""
+        return self.client.create_custom_api_connector(
+            api_key=api_key,
+            sprite_name=sprite_name,
+            connection_name=f"Harbor beehiiv · {sprite_name}",
+            base_api_url="https://api.beehiiv.com/v2",
+            test_url="https://api.beehiiv.com/v2/publications",
+            auth_header_prefix="Bearer",
+            allowed_endpoints=("/publications", "/publications/*"),
+        )
+
     def read_report(self, sprite_name: str, report_path: str) -> str:
         """Read only a worker-produced report from the fixed tenant workspace."""
         if not _REPORT_PATH_PATTERN.fullmatch(report_path):

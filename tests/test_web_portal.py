@@ -3,6 +3,8 @@ import re
 from fastapi.testclient import TestClient
 
 from harbor import control_plane
+from harbor import web_portal
+from harbor.outputs import AdapterReceipt
 from harbor.tenant_store import TenantStore
 
 
@@ -16,6 +18,19 @@ def _client(tmp_path, monkeypatch):
     monkeypatch.setattr(control_plane, "store", store)
     monkeypatch.setattr(control_plane, "SpriteRunner", ProvisionedRunner)
     return store, TestClient(control_plane.app, base_url="https://testserver")
+
+
+class CapturingEmailAdapter:
+    messages = []
+
+    def deliver(self, message, recipients, idempotency_key):
+        self.messages.append((message, recipients, idempotency_key))
+        return AdapterReceipt("email-test")
+
+
+def _capture_email(monkeypatch):
+    CapturingEmailAdapter.messages = []
+    monkeypatch.setattr(web_portal, "ResendEmailAdapter", CapturingEmailAdapter)
 
 
 def test_invited_customer_creates_provisioned_workspace_and_session(
@@ -38,7 +53,7 @@ def test_invited_customer_creates_provisioned_workspace_and_session(
 
     assert response.status_code == 200
     assert "Your Harbor workspace is created" in response.text
-    assert "Harbor access key" in response.text
+    assert "Harbor access key" not in response.text
     record = store.list_active()[0]
     assert record.sprite_name is not None
     assert record.config["provisioning"]["status"] == "ready"
@@ -53,8 +68,70 @@ def test_invited_customer_creates_provisioned_workspace_and_session(
     assert dashboard.status_code == 200
     assert "Example Newsletter" in dashboard.text
     assert "No runs yet" in dashboard.text
-    assert 'name="api_key"' not in dashboard.text
+    assert 'name="api_key"' in dashboard.text
     assert 'name="password"' not in dashboard.text
+
+
+def test_customer_self_signup_emails_code_and_never_shows_access_key(
+    tmp_path, monkeypatch
+):
+    _capture_email(monkeypatch)
+    store, client = _client(tmp_path, monkeypatch)
+
+    requested = client.post("/signup", data={"email": "new@example.com"})
+    assert requested.status_code == 200
+    assert "Check your email" in requested.text
+    message, recipients, _ = CapturingEmailAdapter.messages[0]
+    assert recipients == ["new@example.com"]
+    code = re.search(r"code is: (\S+)", message.text).group(1)
+
+    created = client.post(
+        "/onboarding",
+        data={
+            "invitation_code": code,
+            "email": "new@example.com",
+            "workspace_name": "New Customer",
+            "timezone": "UTC",
+            "hour": "7",
+            "email_delivery": "yes",
+        },
+    )
+    assert created.status_code == 200
+    assert "Your Harbor workspace is created" in created.text
+    assert "access key" not in created.text.lower()
+    assert store.workspace_owner_email(store.list_active()[0].tenant_id) == "new@example.com"
+
+
+def test_customer_signs_in_with_single_use_email_code(tmp_path, monkeypatch):
+    _capture_email(monkeypatch)
+    store, client = _client(tmp_path, monkeypatch)
+    record, _ = store.create_tenant(
+        "passwordless",
+        "Passwordless",
+        "UTC",
+        {"workers": ["newsletter-intelligence"], "connections": [], "outputs": ["files"]},
+    )
+    store.set_workspace_owner(record.tenant_id, "owner@example.com")
+
+    requested = client.post("/login/code", data={"email": "owner@example.com"})
+    assert requested.status_code == 200
+    message = CapturingEmailAdapter.messages[0][0]
+    code = re.search(r"code is: (\S+)", message.text).group(1)
+    signed_in = client.post(
+        "/login/verify",
+        data={"email": "owner@example.com", "code": code.lower()},
+        follow_redirects=False,
+    )
+    assert signed_in.status_code == 303
+    assert signed_in.headers["location"] == "/app"
+    assert "harbor_session=" in signed_in.headers["set-cookie"]
+
+    reused = client.post(
+        "/login/verify",
+        data={"email": "owner@example.com", "code": code},
+        follow_redirects=False,
+    )
+    assert reused.status_code == 401
 
 
 def test_web_session_is_tenant_derived_and_csrf_protected(tmp_path, monkeypatch):
@@ -170,9 +247,25 @@ def test_portal_attaches_and_verifies_only_non_secret_connector_metadata(
     monkeypatch.setattr(control_plane, "store", store)
 
     class VerifiedRunner:
+        def create_beehiiv_connector(self, sprite_name, api_key):
+            assert sprite_name == "harbor-connector-tenant"
+            assert api_key == "temporary-beehiiv-key"
+            return {
+                "id": "bee-main",
+                "gateway_base_url": "https://api.sprites.dev/v1/gateway/custom_api/bee-main",
+            }
+
         def verify_connection(self, sprite_name, connection_spec):
             assert sprite_name == "harbor-connector-tenant"
             assert "api_key" not in str(connection_spec)
+            settings = connection_spec["connections"][0]["settings"]
+            if not settings.get("publication_id"):
+                return {
+                    "status": "discovered",
+                    "publications": [
+                        {"id": "pub_example", "name": "Example newsletter"}
+                    ],
+                }
             return {
                 "status": "verified",
                 "checked_at": "2026-09-06T00:00:00+00:00",
@@ -194,9 +287,7 @@ def test_portal_attaches_and_verifies_only_non_secret_connector_metadata(
         "/app/connection",
         data={
             "csrf_token": csrf,
-            "connection_id": "bee-main",
-            "gateway_base_url": "https://api.sprites.dev/v1/gateway/custom_api/bee-main",
-            "publication_id": "pub_example",
+            "api_key": "temporary-beehiiv-key",
         },
         follow_redirects=False,
     )
@@ -206,3 +297,76 @@ def test_portal_attaches_and_verifies_only_non_secret_connector_metadata(
     assert connection["status"] == "verified"
     assert connection["settings"]["publication_id"] == "pub_example"
     assert "api_key" not in str(connection)
+    assert "temporary-beehiiv-key" not in str(store.list_audit(record.tenant_id))
+
+
+def test_portal_lets_customer_choose_from_multiple_publications(tmp_path, monkeypatch):
+    store = TenantStore(f"sqlite:///{tmp_path / 'publication-web.db'}")
+    record, key = store.create_tenant(
+        "publication-tenant",
+        "Publication Tenant",
+        "UTC",
+        {
+            "workers": ["newsletter-intelligence"],
+            "schedule": {"newsletter-intelligence": {"hour": 6, "minute": 0}},
+            "outputs": ["files"],
+            "connections": [],
+        },
+    )
+    store.set_sprite(record.tenant_id, "harbor-publication-tenant")
+    monkeypatch.setattr(control_plane, "store", store)
+
+    class MultipleRunner:
+        def create_beehiiv_connector(self, sprite_name, api_key):
+            return {
+                "id": "bee-multiple",
+                "gateway_base_url": "https://api.sprites.dev/v1/gateway/custom_api/bee-multiple",
+            }
+
+        def verify_connection(self, sprite_name, connection_spec):
+            publication_id = connection_spec["connections"][0]["settings"].get(
+                "publication_id"
+            )
+            if publication_id:
+                return {
+                    "status": "verified",
+                    "publication_id": publication_id,
+                    "publication_name": "Second newsletter",
+                }
+            return {
+                "status": "selection_required",
+                "publications": [
+                    {"id": "pub_one", "name": "First newsletter"},
+                    {"id": "pub_two", "name": "Second newsletter"},
+                ],
+            }
+
+    monkeypatch.setattr(control_plane, "SpriteRunner", MultipleRunner)
+    client = TestClient(control_plane.app, base_url="https://testserver")
+    client.post(
+        "/login",
+        data={"tenant_id": record.tenant_id, "access_key": key},
+        follow_redirects=False,
+    )
+    dashboard = client.get("/app")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text).group(1)
+    connected = client.post(
+        "/app/connection",
+        data={"csrf_token": csrf, "api_key": "temporary-beehiiv-key"},
+        follow_redirects=False,
+    )
+    assert connected.headers["location"] == "/app?notice=connection_select"
+    chooser = client.get("/app")
+    assert "First newsletter" in chooser.text
+    assert "Second newsletter" in chooser.text
+
+    selected = client.post(
+        "/app/publication",
+        data={"csrf_token": csrf, "publication_id": "pub_two"},
+        follow_redirects=False,
+    )
+    assert selected.headers["location"] == "/app?notice=connection_ready"
+    connection = store.get(record.tenant_id).config["connections"][0]
+    assert connection["status"] == "verified"
+    assert connection["settings"]["publication_id"] == "pub_two"
+    assert "publications" not in connection["settings"]

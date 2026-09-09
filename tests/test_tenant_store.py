@@ -381,6 +381,31 @@ def test_provisioning_failures_are_durable_and_sanitized(tmp_path: Path):
     }
 
 
+def test_passwordless_login_code_is_tenant_scoped_single_use_and_hashed(
+    tmp_path: Path,
+):
+    store = TenantStore(f"sqlite:///{tmp_path / 'passwordless.db'}")
+    _create(store, "acme")
+    store.set_workspace_owner("acme", "owner@example.com")
+
+    code_id, code = store.create_web_login_code("OWNER@example.com")
+    assert code_id.startswith("login_")
+    assert len(code) == 10
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT code_hash,email,tenant_id,consumed_at FROM web_login_codes"
+        ).fetchone()
+    assert code not in row[0]
+    assert row[1:3] == ("owner@example.com", "acme")
+    assert row[3] is None
+
+    assert store.redeem_web_login_code("owner@example.com", code).tenant_id == "acme"
+    with pytest.raises(TenantStoreError, match="invalid or expired"):
+        store.redeem_web_login_code("owner@example.com", code)
+    with pytest.raises(TenantStoreError, match="does not match"):
+        store.create_web_login_code("missing@example.com")
+
+
 def test_secret_shaped_connection_metadata_is_rejected(tmp_path: Path):
     store = TenantStore(f"sqlite:///{tmp_path / 'harbor.db'}")
     _create(store)

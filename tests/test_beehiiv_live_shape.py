@@ -104,3 +104,33 @@ def test_percentage_shaped_provider_rates_are_normalized(monkeypatch):
     assert result["avg_click_rate"] == 0.03
     assert result["recent_posts"][0]["open_rate"] == 0.5
     assert result["recent_posts"][0]["click_rate"] == 0.04
+
+
+def test_publication_discovery_returns_only_safe_choices(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "data": [
+                        {"id": "pub_one", "name": "First", "secret": "ignored"},
+                        {"id": "pub_two", "name": "Second"},
+                    ]
+                }
+            ).encode()
+
+    monkeypatch.setattr(
+        beehiiv_client.urllib.request, "urlopen", lambda request, timeout: Response()
+    )
+    assert beehiiv_client.list_publications(
+        base_url="https://api.sprites.dev/v1/gateway/custom_api/connector",
+        auth_mode="sprite_connector",
+    ) == [
+        {"id": "pub_one", "name": "First"},
+        {"id": "pub_two", "name": "Second"},
+    ]

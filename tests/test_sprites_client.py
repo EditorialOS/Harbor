@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+import httpx
 import pytest
 from sprites import NotFoundError
 from sprites import SpriteError as SDKSpriteError
@@ -201,3 +202,75 @@ def test_checkpoint_requires_terminal_complete_event():
     incomplete_sprite = FakeSprite(checkpoint_messages=[Message("info", "creating")])
     with pytest.raises(SpriteError, match="without a complete event"):
         _client(FakeSDK(incomplete_sprite)).checkpoint("harbor-tenant", "installed")
+
+
+def test_custom_api_connector_is_scoped_and_returns_only_safe_metadata():
+    captured = {}
+
+    def handler(request):
+        captured["request"] = request
+        return httpx.Response(
+            201,
+            json={
+                "connection": {
+                    "id": "connector-123",
+                    "provider": "custom_api",
+                    "provider_account_name": "Harbor beehiiv",
+                    "access_policy": {
+                        "name_prefix": "harbor-tenant-a1b2c3d4",
+                        "allowed_endpoints": ["/publications", "/publications/*"],
+                    },
+                }
+            },
+        )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = SpritesClient(
+        token="sprites-test-token",
+        sdk_client=FakeSDK(),
+        http_client=http_client,
+    )
+    result = client.create_custom_api_connector(
+        api_key="beehiiv-test-secret",
+        sprite_name="harbor-tenant-a1b2c3d4",
+        connection_name="Harbor beehiiv",
+        base_api_url="https://api.beehiiv.com/v2",
+        test_url="https://api.beehiiv.com/v2/publications",
+        allowed_endpoints=("/publications", "/publications/*"),
+    )
+
+    request_body = captured["request"].read().decode()
+    assert '"api_key":"beehiiv-test-secret"' in request_body
+    assert '"name_prefix":"harbor-tenant-a1b2c3d4"' in request_body
+    assert '"allowed_endpoints":["/publications","/publications/*"]' in request_body
+    assert result == {
+        "id": "connector-123",
+        "provider": "custom_api",
+        "gateway_base_url": "https://api.sprites.dev/v1/gateway/custom_api/connector-123",
+        "access_policy": {
+            "name_prefix": "harbor-tenant-a1b2c3d4",
+            "allowed_endpoints": ["/publications", "/publications/*"],
+        },
+        "provider_account_name": "Harbor beehiiv",
+    }
+    assert "secret" not in str(result)
+
+
+def test_custom_api_connector_failure_never_echoes_secret():
+    def handler(request):
+        return httpx.Response(400, json={"error": "echo beehiiv-private-value"})
+
+    client = SpritesClient(
+        token="sprites-test-token",
+        sdk_client=FakeSDK(),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(SpriteError) as caught:
+        client.create_custom_api_connector(
+            api_key="beehiiv-private-value",
+            sprite_name="harbor-tenant",
+            connection_name="Harbor beehiiv",
+            base_api_url="https://api.beehiiv.com/v2",
+            test_url="https://api.beehiiv.com/v2/publications",
+        )
+    assert "beehiiv-private-value" not in str(caught.value)

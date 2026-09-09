@@ -53,3 +53,24 @@ def test_probe_surfaces_provider_failure(monkeypatch):
         "checked_at": result["checked_at"],
         "error": {"kind": "beehiiv_http_error", "detail": "401 unauthorized"},
     }
+
+
+def test_probe_discovers_publications_without_requiring_customer_ids(monkeypatch):
+    spec = _spec()
+    del spec["connections"][0]["settings"]["publication_id"]
+
+    monkeypatch.setattr(
+        connection_probe.beehiiv_client,
+        "list_publications",
+        lambda **kwargs: [
+            {"id": "pub_one", "name": "First"},
+            {"id": "pub_two", "name": "Second"},
+        ],
+    )
+
+    result = connection_probe.probe(spec)
+    assert result["status"] == "selection_required"
+    assert result["publications"] == [
+        {"id": "pub_one", "name": "First"},
+        {"id": "pub_two", "name": "Second"},
+    ]

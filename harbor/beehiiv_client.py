@@ -157,6 +157,41 @@ def verify_publication(
     }
 
 
+def list_publications(
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    auth_mode: str = "bearer",
+) -> list[dict[str, str | None]]:
+    """Return the safe publication choices visible to a connection."""
+    api_key = api_key or os.environ.get("BEEHIIV_API_KEY")
+    base_url = base_url or BEEHIIV_BASE
+    if auth_mode == "bearer" and not api_key:
+        raise BeehiivError(
+            "missing_credential", "No live beehiiv credential was provided."
+        )
+    response = _get(
+        "/publications",
+        api_key=api_key,
+        base_url=base_url,
+        auth_mode=auth_mode,
+    )
+    rows = response.get("data", [])
+    if not isinstance(rows, list):
+        raise BeehiivError("invalid_provider_response", "publications are invalid")
+    publications = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+            continue
+        publications.append(
+            {
+                "id": row["id"],
+                "name": row.get("name") if isinstance(row.get("name"), str) else None,
+            }
+        )
+    return publications
+
+
 def _mock(pub_id, n):
     return {
         "publication_id": pub_id,
