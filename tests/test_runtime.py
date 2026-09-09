@@ -41,8 +41,13 @@ def test_newsletter_worker_mock_end_to_end(tmp_path):
     report = Path(result.deliverables[0])
     assert report.exists()
     text = report.read_text()
-    assert "What matters" in text
-    assert "Do next" in text
+    assert "What changed" in text
+    assert "Why it matters" in text
+    assert "Trends vs prior performance / baseline" in text
+    assert "Strongest and weakest content" in text
+    assert "Audience and growth signals" in text
+    assert "Recommended actions" in text
+    assert "Important anomalies" in text
     assert "Development mode" in text
 
 
@@ -120,5 +125,5 @@ def test_zero_baseline_report_has_actionable_guidance(tmp_path, monkeypatch):
     report = Path(result.deliverables[0]).read_text()
     assert "baseline is zero or unavailable" in report
     assert "Build an initial active subscriber cohort" in report
-    assert "no recorded email recipients" in report
+    assert "zero email recipients" in report
     assert "Strongest recent" not in report

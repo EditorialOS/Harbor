@@ -11,7 +11,13 @@ from typing import Any
 
 def ensure_workspace(root: str | Path) -> Path:
     root = Path(root)
-    for rel in ("Work/reports", "Work/runs", "Work/intake", "Work/drafts"):
+    for rel in (
+        "Work/reports",
+        "Work/runs",
+        "Work/intake",
+        "Work/drafts",
+        "Work/state",
+    ):
         (root / rel).mkdir(parents=True, exist_ok=True)
     return root
 

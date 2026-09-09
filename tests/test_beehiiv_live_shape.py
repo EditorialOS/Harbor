@@ -37,14 +37,70 @@ def test_sanitized_live_shape_through_sprite_connector(monkeypatch):
     assert result["publication_name"] == "Sanitized publication"
     assert result["active_subscribers"] == 0
     assert result["recent_posts"][0] == {
+        "id": "post_sanitized",
         "title": "Sanitized issue",
         "published": "2026-09-05T12:00:00Z",
         "recipients": 0,
+        "delivered": None,
         "open_rate": 0.0,
         "click_rate": 0.0,
         "opens": 0,
+        "unique_opens": None,
         "clicks": 0,
+        "unique_clicks": None,
+        "unsubscribes": None,
+        "spam_reports": None,
         "web_views": 0,
+        "web_clicks": None,
+        "upgrades": None,
     }
     assert len(requests) == 2
     assert all(request.get_header("Authorization") is None for request in requests)
+
+
+def test_percentage_shaped_provider_rates_are_normalized(monkeypatch):
+    responses = iter(
+        [
+            {
+                "data": {
+                    "name": "Publication",
+                    "stats": {"average_open_rate": 42.5, "average_click_rate": 3},
+                }
+            },
+            {
+                "data": [
+                    {
+                        "id": "post_1",
+                        "title": "Issue",
+                        "stats": {
+                            "email": {"open_rate": 50, "click_rate": 4},
+                            "web": {},
+                        },
+                    }
+                ]
+            },
+        ]
+    )
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return json.dumps(next(responses)).encode()
+
+    monkeypatch.setattr(
+        beehiiv_client.urllib.request, "urlopen", lambda request, timeout: Response()
+    )
+    result = beehiiv_client.publication_performance(
+        "pub_sanitized",
+        api_key="test-only",
+    )
+
+    assert result["avg_open_rate"] == 0.425
+    assert result["avg_click_rate"] == 0.03
+    assert result["recent_posts"][0]["open_rate"] == 0.5
+    assert result["recent_posts"][0]["click_rate"] == 0.04
