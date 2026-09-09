@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from mcp.server import MCPServer
+from mcp.server.apps import Apps, ResourceCsp
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import TokenVerifier
 from mcp.server.auth.settings import AuthSettings
@@ -16,6 +17,7 @@ from mcp.server.mcpserver import Context
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 
+from .chatgpt_ui import HARBOR_APP_HTML, HARBOR_APP_URI
 from .dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
 from .oauth import READ_SCOPE, RUN_SCOPE, Auth0TokenVerifier, OAuthConfig
 from .outputs import DeliveryCoordinator
@@ -59,6 +61,129 @@ def _public_run(record: RunRecord) -> dict[str, Any]:
         "started_at": record.started_at,
         "finished_at": record.finished_at,
         "deliveries": result.get("deliveries", []),
+        "error": record.last_error if record.status == "failed" else None,
+    }
+
+
+def _safe_post(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        key: value.get(key)
+        for key in (
+            "id",
+            "title",
+            "published",
+            "recipients",
+            "delivered",
+            "open_rate",
+            "click_rate",
+            "unsubscribes",
+            "spam_reports",
+            "web_views",
+        )
+    }
+
+
+def _safe_intelligence(result: dict[str, Any]) -> dict[str, Any] | None:
+    data = result.get("data") or {}
+    intelligence = data.get("intelligence") or data.get("derived")
+    metrics = data.get("metrics") or {}
+    if not isinstance(intelligence, dict) or not isinstance(metrics, dict):
+        return None
+    recent_posts = metrics.get("recent_posts") or []
+    latest_post = _safe_post(
+        intelligence.get("latest") or (recent_posts[0] if recent_posts else None)
+    )
+    safe_intelligence = {
+        key: intelligence.get(key) or []
+        for key in (
+            "what_changed",
+            "why_it_matters",
+            "trends",
+            "audience_signals",
+            "recommendations",
+            "anomalies",
+        )
+    }
+    safe_intelligence["headline"] = intelligence.get("headline") or result.get(
+        "summary"
+    )
+    safe_intelligence["strongest_open"] = _safe_post(
+        intelligence.get("best_open")
+    )
+    safe_intelligence["weakest_open"] = _safe_post(
+        intelligence.get("weakest_open")
+    )
+    safe_intelligence["strongest_click"] = _safe_post(
+        intelligence.get("best_click")
+    )
+    safe_intelligence["weakest_click"] = _safe_post(
+        intelligence.get("weakest_click")
+    )
+    return {
+        "metrics": {
+            "publication_name": metrics.get("publication_name"),
+            "active_subscribers": metrics.get("active_subscribers"),
+            "active_free_subscribers": metrics.get("active_free_subscribers"),
+            "active_premium_subscribers": metrics.get("active_premium_subscribers"),
+            "avg_open_rate": metrics.get("avg_open_rate"),
+            "avg_click_rate": metrics.get("avg_click_rate"),
+            "latest_post": latest_post,
+        },
+        "intelligence": safe_intelligence,
+    }
+
+
+def _dashboard_payload(store: TenantStore, tenant: TenantRecord) -> dict[str, Any]:
+    runs = store.list_runs(tenant.tenant_id, limit=10)
+    latest = None
+    for record in runs:
+        if record.worker_id != "newsletter-intelligence" or record.status != "completed":
+            continue
+        safe = _safe_intelligence(record.result or {})
+        if safe is not None:
+            latest = {
+                "run_id": record.run_id,
+                "summary": (record.result or {}).get("summary"),
+                "finished_at": record.finished_at,
+                **safe,
+            }
+            break
+    enabled = set(tenant.config.get("workers", []))
+    sources = [
+        {
+            "provider": item.get("provider"),
+            "label": str(item.get("provider") or "Source").capitalize(),
+            "status": item.get("status") or "not_connected",
+            "last_verified_at": item.get("last_verified_at"),
+        }
+        for item in tenant.config.get("connections", [])
+    ]
+    beehiiv_ready = any(
+        source["provider"] == "beehiiv" and source["status"] == "verified"
+        for source in sources
+    )
+    return {
+        "workspace": {
+            "name": tenant.name,
+            "timezone": tenant.timezone,
+            "sprite_provisioned": bool(tenant.sprite_name),
+        },
+        "connection_status": (
+            "ready" if tenant.sprite_name and beehiiv_ready else "needs_attention"
+        ),
+        "sources": sources,
+        "workers": [
+            {
+                **details,
+                "enabled": worker_id in enabled,
+                "runnable": worker_id != "alex",
+            }
+            for worker_id, details in worker_catalog().items()
+        ],
+        "recent_runs": [_public_run(record) for record in runs],
+        "latest_intelligence": latest,
     }
 
 
@@ -137,22 +262,56 @@ def create_remote_mcp(
             validate_token_resource=True,
         )
         token_verifier = token_verifier or Auth0TokenVerifier(store, oauth_config)
-    server = MCPServer(
-        "Harbor",
-        instructions=(
-            "Use Harbor to inspect and run workers for the authenticated workspace. "
-            "Tenant identity always comes from the bearer credential."
-        ),
-        auth=auth_settings,
-        token_verifier=token_verifier,
-    )
-
     read_security = [
         {"type": "oauth2", "scopes": ["openid", "email", READ_SCOPE]},
     ]
     run_security = [
         {"type": "oauth2", "scopes": ["openid", "email", READ_SCOPE, RUN_SCOPE]},
     ]
+    apps = Apps()
+    apps.add_html_resource(
+        HARBOR_APP_URI,
+        HARBOR_APP_HTML,
+        name="Harbor dashboard",
+        title="Harbor",
+        description="Editorial dashboard for a Harbor workspace.",
+        csp=ResourceCsp(connect_domains=[], resource_domains=[]),
+        prefers_border=True,
+    )
+
+    @apps.tool(
+        resource_uri=HARBOR_APP_URI,
+        visibility=["model", "app"],
+        name="harbor_dashboard",
+        title="Show Harbor dashboard",
+        description=(
+            "Render the authenticated workspace’s latest intelligence, sources, "
+            "workers, recommendations, runs, and connection status."
+        ),
+        annotations=ToolAnnotations(readOnlyHint=True),
+        meta={
+            "securitySchemes": read_security,
+            "openai/toolInvocation/invoking": "Opening Harbor…",
+            "openai/toolInvocation/invoked": "Harbor is ready.",
+        },
+    )
+    def dashboard(ctx: Context) -> dict[str, Any]:
+        tenant = _tenant_for_context(ctx, store)
+        return _dashboard_payload(store, tenant)
+
+    server = MCPServer(
+        "Harbor",
+        title="Harbor",
+        description="Run and inspect tenant-isolated AI workers.",
+        instructions=(
+            "Use Harbor to inspect and run workers for the authenticated workspace. "
+            "Use harbor_dashboard when the user asks to see or open Harbor. "
+            "Tenant identity always comes from the bearer credential."
+        ),
+        auth=auth_settings,
+        token_verifier=token_verifier,
+        extensions=[apps],
+    )
 
     @server.tool(
         name="harbor_worker_catalog",

@@ -68,7 +68,32 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
             self.calls.append((sprite_name, run_spec))
             return {
                 "status": "completed",
-                "summary": "real report completed",
+                "summary": "Open performance is above recent sends.",
+                "data": {
+                    "metrics": {
+                        "publication_name": "Acme Dispatch",
+                        "active_subscribers": 1200,
+                        "avg_open_rate": 0.42,
+                        "avg_click_rate": 0.04,
+                        "recent_posts": [
+                            {
+                                "id": "post_latest",
+                                "title": "Latest issue",
+                                "open_rate": 0.51,
+                                "click_rate": 0.06,
+                            }
+                        ],
+                    },
+                    "intelligence": {
+                        "headline": "Open performance is above recent sends.",
+                        "what_changed": ["Open rate increased."],
+                        "why_it_matters": ["More readers reached the issue."],
+                        "trends": [],
+                        "audience_signals": ["Active subscribers: 1,200."],
+                        "recommendations": ["Reuse the subject structure."],
+                        "anomalies": [],
+                    },
+                },
                 "deliverables": ["/workspace/Work/reports/private-report.md"],
             }
 
@@ -90,6 +115,7 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
             for tool in listed.json()["result"]["tools"]
         }
         assert set(schemas) == {
+            "harbor_dashboard",
             "harbor_worker_catalog",
             "harbor_status",
             "harbor_enabled_workers",
@@ -99,6 +125,28 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
         assert "tenant_id" not in str(schemas)
         assert "path" not in str(schemas).lower()
         assert "input" not in schemas["harbor_run_worker"]["properties"]
+        tools = {
+            tool["name"]: tool for tool in listed.json()["result"]["tools"]
+        }
+        assert tools["harbor_dashboard"]["_meta"]["ui"] == {
+            "resourceUri": "ui://harbor/dashboard-v1.html",
+            "visibility": ["model", "app"],
+        }
+
+        resources = _request(client, key_a, "resources/list").json()["result"][
+            "resources"
+        ]
+        assert resources[0]["uri"] == "ui://harbor/dashboard-v1.html"
+        assert resources[0]["mimeType"] == "text/html;profile=mcp-app"
+        resource = _request(
+            client,
+            key_a,
+            "resources/read",
+            {"uri": "ui://harbor/dashboard-v1.html"},
+        ).json()["result"]["contents"][0]
+        assert resource["mimeType"] == "text/html;profile=mcp-app"
+        assert "ui/notifications/tool-result" in resource["text"]
+        assert "harbor_run_worker" in resource["text"]
 
         status_a = _request(
             client,
@@ -129,6 +177,19 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
         assert second["structuredContent"]["duplicate_suppressed"] is True
         assert len(Runner.calls) == 1
         assert "private-report.md" not in str(first) + str(second)
+
+        dashboard = _request(
+            client,
+            key_a,
+            "tools/call",
+            {"name": "harbor_dashboard", "arguments": {}},
+        ).json()["result"]["structuredContent"]
+        assert dashboard["workspace"]["name"] == "Acme"
+        assert dashboard["latest_intelligence"]["metrics"]["active_subscribers"] == 1200
+        assert dashboard["latest_intelligence"]["intelligence"]["recommendations"] == [
+            "Reuse the subject structure."
+        ]
+        assert "private-report.md" not in str(dashboard)
 
         runs_a = _request(
             client,
