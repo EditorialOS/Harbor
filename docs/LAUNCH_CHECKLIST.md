@@ -45,9 +45,9 @@ production-ready or opened to public paid signup.
 
 ## Release and distribution
 
-- [ ] All tests and the Postgres CI contract pass on the release commit.
-- [ ] The release image is deployed and schema 12 is healthy.
-- [ ] Live report and email delivery pass on the release image.
+- [x] All tests and the Postgres contract pass on the release commit.
+- [x] The release image is deployed and schema 12 is healthy.
+- [x] Live report and email delivery pass on the release image.
 - [ ] ChatGPT app OAuth and every declared tool pass on the release image.
 - [ ] Public ChatGPT app submission materials and review requirements are met.
 - [ ] Git is clean and the release commit/tag is recorded.

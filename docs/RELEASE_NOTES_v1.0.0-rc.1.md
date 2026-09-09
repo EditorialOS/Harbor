@@ -21,7 +21,8 @@ declaring the service production-ready.
 
 ## Verification
 
-Local acceptance is recorded by the repository test suite. Sanitized live
+Local acceptance is recorded by the 104-test repository suite, including its
+PostgreSQL contract. The local and Fly remote production images build. Sanitized live
 evidence is in `docs/LIVE_ACCEPTANCE_EVIDENCE.md`. Remaining external launch
 checks are explicit in `docs/LAUNCH_CHECKLIST.md` and
 `docs/KNOWN_LIMITATIONS.md`.

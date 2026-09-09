@@ -1,6 +1,6 @@
 # Live acceptance evidence
 
-This file records sanitized production-alpha evidence only. It contains no
+This file records sanitized live evidence only. It contains no
 tokens, authorization headers, provider credentials, gateway URLs, publication
 identifiers, recipient addresses, or customer report content.
 
@@ -9,7 +9,7 @@ identifiers, recipient addresses, or customer report content.
 - Harbor control-plane app: `harbor-roger-280`
 - Pilot Sprite: `harbor-pilot-07ae38b9`
 - Control-plane health: passing
-- Postgres schema version: 9
+- Postgres schema version: 12
 - Sprite runtime install, checkpoint, cold wake, persistent probe, and live
   worker reconciliation: passed using `docs/SPRITES_LIVE_VERIFICATION.md`
 
@@ -46,6 +46,31 @@ identifiers, recipient addresses, or customer report content.
 - Production mock marker: absent
 - Resend secret in tenant/run/report state: absent
 
+## v1 release-candidate deployment
+
+- Deployed package version: `1.0.0rc1`
+- Fly app and scheduler Machine version: 21
+- Fly image: `deployment-01M22M6JA550FS61CKRMH6TGT3`
+- Database schema version: 12
+- `/healthz`, `/readyz`, `/status`, `/metrics`, `/privacy`, `/terms`,
+  `/support`, and `/signup`: passed
+- MCP protected-resource OAuth discovery: passed
+- Unauthenticated MCP request: HTTP 401
+- Auth0 discovery advertises authorization, token, UserInfo, registration,
+  `openid`, `email`, and `offline_access`: passed
+- Release-check run: `run_ca640a049e9934b6a3ba72f3`
+- Existing pilot Sprite automatically upgraded to the bundled runtime
+  fingerprint before execution: passed
+- Real-source worker and email delivery: completed on first attempt
+- Required analysis sections in the persisted Sprite report: all present
+- Persisted report bytes: 1,385
+- Persisted report SHA-256:
+  `800e4766e2c2defe92a9e34a4312bf509985ac0466fc02b8171bb2229089f42c`
+- Production mock marker: absent
+- Repeating the release-check idempotency key: duplicate suppressed
+- Local complete suite with disposable PostgreSQL 16: 104 passed
+- Local and Fly remote production image builds: passed
+
 ## Second-tenant isolation
 
 - Second tenant: `isolation-b`
@@ -61,5 +86,5 @@ identifiers, recipient addresses, or customer report content.
 - Missing-connector worker failure persisted for tenant B: passed
 
 These results complete the first delivered-pilot and live isolation milestones.
-They do not make Harbor beta or production-ready; the remaining gates are kept
+They do not make Harbor production-ready; the remaining gates are kept
 in `BUILD_STATUS.md`.
