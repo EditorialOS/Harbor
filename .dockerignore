@@ -1,6 +1,13 @@
 .git
+.github
+.venv
+.pytest_cache
+.ruff_cache
 __pycache__
 *.pyc
+build
+dist
+*.egg-info
 harbor.db
 Work
 tenants

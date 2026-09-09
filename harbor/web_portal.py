@@ -49,7 +49,7 @@ def _page(title: str, content: str, *, status_code: int = 200) -> HTMLResponse:
         + """ · Harbor</title><style>
 :root{color-scheme:light;--ink:#10233f;--muted:#607089;--line:#dce4ee;--brand:#175cd3;--ok:#087443;--warn:#9a6700;--bad:#b42318;--bg:#f5f8fc}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,sans-serif}
-main{max-width:880px;margin:0 auto;padding:40px 20px 80px}nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:36px}.brand{font-size:22px;font-weight:800;letter-spacing:-.02em}
+main{max-width:880px;margin:0 auto;padding:40px 20px 80px}nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:36px}.brand{font-size:22px;font-weight:800;letter-spacing:-.02em}footer{border-top:1px solid var(--line);margin-top:42px;padding-top:18px;color:var(--muted);font-size:13px}footer a{color:inherit;margin-right:16px}
 h1{font-size:34px;line-height:1.15;margin:0 0 12px}h2{font-size:21px;margin:0 0 14px}.lede,.muted{color:var(--muted)}.lede{font-size:18px;margin:0 0 28px}
 .card{background:white;border:1px solid var(--line);border-radius:14px;padding:22px;margin:18px 0;box-shadow:0 5px 18px rgba(16,35,63,.05)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:18px}.grid .card{margin:0}
 label{display:block;font-weight:650;margin:14px 0 5px}input,select{width:100%;font:inherit;padding:10px 12px;border:1px solid #b9c6d6;border-radius:8px;background:#fff}input[type=checkbox]{width:auto;margin-right:8px}
@@ -59,7 +59,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px 6px
 form.inline{display:inline}form.inline button{margin:0}.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.small{font-size:13px}
 </style></head><body><main><nav><div class="brand">Harbor</div></nav>"""
         + content
-        + "</main></body></html>",
+        + '<footer><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/status">Service status</a></footer></main></body></html>',
         status_code=status_code,
     )
     response.headers["Content-Security-Policy"] = (
@@ -296,6 +296,54 @@ def create_web_router(
             """<h1>Your newsletter’s useful signals, every morning.</h1>
 <p class="lede">Harbor securely reads your newsletter performance, runs inside your private worker computer, and delivers a concise brief.</p>
 <div class="actions"><a class="button" href="/signup">Create workspace</a><a class="button secondary" href="/login">Sign in</a></div>""",
+        )
+
+    @router.get("/privacy", response_class=HTMLResponse)
+    def privacy_notice():
+        return _page(
+            "Privacy",
+            """<h1>Privacy notice</h1><p class="lede">How Harbor handles information while delivering Newsletter Intelligence.</p>
+<section class="card"><h2>Information Harbor processes</h2><p>Harbor stores your account email, workspace settings, schedule, delivery destination, non-secret connection metadata, run history, delivery status, and audit events. When a worker runs, Harbor processes the newsletter performance data needed to create your report.</p></section>
+<section class="card"><h2>Credentials and tenant isolation</h2><p>Provider credentials are stored by Fly’s encrypted connector service. Harbor does not store the raw provider credential in its database, worker files, reports, or logs. Each workspace receives a separate persistent Sprite, and every operation is scoped to its workspace.</p></section>
+<section class="card"><h2>Service providers</h2><p>Harbor uses infrastructure and delivery providers to operate the service, including Fly.io for application and worker compute, a hosted Postgres provider for durable state, Auth0 for ChatGPT OAuth, and Resend for email delivery. Connected services such as beehiiv provide source data at your direction.</p></section>
+<section class="card"><h2>Your choices</h2><p>You can disconnect a source, disable email delivery, or request workspace deletion. This pre-launch notice must be reviewed and paired with a support contact before public commercial release.</p><p class="muted small">Last updated September 8, 2026.</p></section>""",
+        )
+
+    @router.get("/terms", response_class=HTMLResponse)
+    def terms_notice():
+        return _page(
+            "Terms",
+            """<h1>Service terms</h1><p class="lede">Plain-language pre-launch terms for Harbor.</p>
+<section class="card"><h2>The service</h2><p>Harbor connects to sources you authorize, runs enabled workers in your isolated workspace, stores run state, and delivers intelligence reports on the schedule you choose.</p></section>
+<section class="card"><h2>Your responsibilities</h2><p>You must be authorized to connect each source and delivery address. Do not use Harbor to process unlawful content or to interfere with another workspace or service.</p></section>
+<section class="card"><h2>Availability and outputs</h2><p>Harbor reports are informational and may contain errors. Scheduled delivery depends on connected providers and infrastructure. Failures are recorded visibly and retried according to Harbor’s operating policy.</p></section>
+<section class="card"><h2>Before public launch</h2><p>These terms are a product-completeness placeholder, not a final legal agreement. Pricing, cancellation, retention, support, liability, and governing-law terms must be approved before accepting public customers.</p><p class="muted small">Last updated September 8, 2026.</p></section>""",
+        )
+
+    @router.get("/status", response_class=HTMLResponse)
+    def public_status():
+        try:
+            snapshot = store_getter().operational_snapshot()
+            heartbeat = snapshot["scheduler_heartbeat_status"]
+            age = snapshot["scheduler_heartbeat_age_seconds"]
+            scheduler_ok = heartbeat == "healthy" and age is not None and age < 300
+            healthy = (
+                scheduler_ok
+                and snapshot["overdue_schedules"] == 0
+                and snapshot["expired_run_leases"] == 0
+            )
+        except Exception:  # noqa: BLE001 - public health boundary
+            healthy = False
+            heartbeat = "unavailable"
+        status = "Operational" if healthy else "Needs attention"
+        css = "ok" if healthy else "bad"
+        return _page(
+            "Service status",
+            f"""<h1>Harbor service status</h1><p class="lede status {css}">{status}</p>
+<section class="card"><h2>Control plane</h2><p class="status {css}">{status}</p></section>
+<section class="card"><h2>Scheduler</h2><p>{_escape(heartbeat.replace('_', ' ').title())}</p></section>
+<p class="muted small">This page reports aggregate service health and never exposes customer identifiers or activity.</p>""",
+            status_code=200 if healthy else 503,
         )
 
     @router.get("/signup", response_class=HTMLResponse)
@@ -568,6 +616,11 @@ def create_web_router(
             f"<tr><td>{_escape(run.started_at[:19].replace('T', ' '))}</td><td>{_escape(run.status)}</td><td>{_escape(run.attempt_count)}</td></tr>"
             for run in runs
         ) or '<tr><td colspan="3" class="muted">No runs yet.</td></tr>'
+        audit = store.list_audit(record.tenant_id, limit=10)
+        audit_rows = "".join(
+            f"<tr><td>{_escape(event.created_at[:19].replace('T', ' '))}</td><td>{_escape(event.action.replace('.', ' ').title())}</td></tr>"
+            for event in audit
+        ) or '<tr><td colspan="2" class="muted">No activity yet.</td></tr>'
         next_run = (
             _escape(schedule_state.next_run_at)
             if schedule_state
@@ -598,6 +651,7 @@ def create_web_router(
 <section class="card"><h2>Run now</h2><p>Uses the same worker and delivery path as the scheduler.</p><form method="post" action="/app/run"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><input type="hidden" name="idempotency_key" value="{_escape(run_operation)}"><button type="submit" {'disabled' if not record.sprite_name else ''}>Run Newsletter Intelligence</button></form></section>
 
 <section class="card"><h2>Recent runs</h2><table><thead><tr><th>Started (UTC)</th><th>Status</th><th>Attempts</th></tr></thead><tbody>{run_rows}</tbody></table></section>
+<section class="card"><h2>Workspace activity</h2><table><thead><tr><th>Time (UTC)</th><th>Event</th></tr></thead><tbody>{audit_rows}</tbody></table></section>
 <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}"><button class="secondary" type="submit">Sign out</button></form>"""
         return _page(record.name, content)
 

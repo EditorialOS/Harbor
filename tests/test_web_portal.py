@@ -70,6 +70,8 @@ def test_invited_customer_creates_provisioned_workspace_and_session(
     assert "No runs yet" in dashboard.text
     assert 'name="api_key"' in dashboard.text
     assert 'name="password"' not in dashboard.text
+    assert "Workspace activity" in dashboard.text
+    assert "Tenant Created" in dashboard.text
 
 
 def test_customer_self_signup_emails_code_and_never_shows_access_key(
@@ -100,6 +102,26 @@ def test_customer_self_signup_emails_code_and_never_shows_access_key(
     assert "Your Harbor workspace is created" in created.text
     assert "access key" not in created.text.lower()
     assert store.workspace_owner_email(store.list_active()[0].tenant_id) == "new@example.com"
+
+
+def test_public_legal_status_pages_and_security_headers(tmp_path, monkeypatch):
+    store, client = _client(tmp_path, monkeypatch)
+    store.upsert_service_heartbeat("scheduler", "healthy", {})
+
+    privacy = client.get("/privacy")
+    terms = client.get("/terms")
+    status = client.get("/status")
+
+    assert privacy.status_code == 200
+    assert "does not store the raw provider credential" in privacy.text
+    assert terms.status_code == 200
+    assert "not a final legal agreement" in terms.text
+    assert status.status_code == 200
+    assert "Operational" in status.text
+    assert "Strict-Transport-Security" in status.headers
+    assert status.headers["Permissions-Policy"] == (
+        "camera=(), microphone=(), geolocation=()"
+    )
 
 
 def test_customer_signs_in_with_single_use_email_code(tmp_path, monkeypatch):

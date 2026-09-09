@@ -52,6 +52,18 @@ app = FastAPI(title="Harbor Control Plane", version="0.9.0-alpha", lifespan=_lif
 app.mount("/mcp", remote_mcp.app)
 
 
+@app.middleware("http")
+async def production_security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+    )
+    return response
+
+
 def _slug(value: str) -> str:
     value = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")
     return value[:32] or "tenant"
