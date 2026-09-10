@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import datetime as dt
+import statistics
 from typing import Any
 
 from .. import beehiiv_client
 from ..config import ConnectionConfig
 from ..newsletter_model import (
+    MetricState,
     MetricValue,
     NewsletterDataset,
     NewsletterIssue,
@@ -24,6 +26,19 @@ def _rate(value: Any) -> MetricValue:
 
 def _count(value: Any) -> MetricValue:
     return provider_metric(value, provider="Beehiiv")
+
+
+def _mean(issues: tuple[NewsletterIssue, ...], name: str) -> MetricValue:
+    values = [
+        float(metric.value)
+        for issue in issues
+        if (metric := getattr(issue, name)).state is MetricState.AVAILABLE
+    ]
+    return (
+        MetricValue.available(statistics.fmean(values))
+        if values
+        else MetricValue.no_data("Beehiiv returned no comparable issues in this range")
+    )
 
 
 def _unsubscribe_rate(row: dict[str, Any]) -> MetricValue:
@@ -56,6 +71,7 @@ class BeehiivNewsletterConnector:
             "spam_reports",
             "web_engagement",
             "subject_lines",
+            "date_filtering",
         }
     )
 
@@ -125,11 +141,14 @@ class BeehiivNewsletterConnector:
                     base_url=base_url,
                     auth_mode=auth_mode,
                     allow_mock=request.allow_mock,
+                    start_at=request.window.start,
+                    end_at=request.window.end,
                 )
             except beehiiv_client.BeehiivError as error:
                 raise ConnectorError(self.provider, error.kind, error.detail) from error
             is_mock = is_mock or bool(raw.get("_mock"))
             issues = tuple(self._issue(item) for item in raw.get("recent_posts", []))
+            bounded = request.window.start is not None or request.window.end is not None
             publications.append(
                 NewsletterPublication(
                     provider=self.provider,
@@ -141,9 +160,17 @@ class BeehiivNewsletterConnector:
                     paid_subscribers=_count(raw.get("active_premium_subscribers")),
                     total_subscribers=_count(raw.get("total_subscribers")),
                     subscriber_growth=MetricValue.insufficient_history(),
-                    sends=_count(raw.get("total_sent")),
-                    average_open_rate=_rate(raw.get("avg_open_rate")),
-                    average_click_rate=_rate(raw.get("avg_click_rate")),
+                    sends=_count(len(issues) if bounded else raw.get("total_sent")),
+                    average_open_rate=(
+                        _mean(issues, "open_rate")
+                        if bounded
+                        else _rate(raw.get("avg_open_rate"))
+                    ),
+                    average_click_rate=(
+                        _mean(issues, "click_rate")
+                        if bounded
+                        else _rate(raw.get("avg_click_rate"))
+                    ),
                     issues=issues,
                     metadata={"organization_name": raw.get("organization_name")},
                 )

@@ -1,3 +1,4 @@
+import datetime as dt
 import json
 from pathlib import Path
 
@@ -137,3 +138,28 @@ def test_publication_discovery_returns_only_safe_choices(monkeypatch):
         {"id": "pub_one", "name": "First"},
         {"id": "pub_two", "name": "Second"},
     ]
+
+
+def test_posts_are_filtered_to_explicit_window_without_inventing_metrics(monkeypatch):
+    pages = {
+        1: [
+            {"id": "future", "displayed_date": "2026-09-11T12:00:00Z", "stats": {}},
+            {"id": "inside", "displayed_date": "2026-09-09T12:00:00Z", "stats": {}},
+            {"id": "old", "displayed_date": "2026-09-01T12:00:00Z", "stats": {}},
+        ]
+    }
+
+    def fake_get(path, params=None, **kwargs):
+        if path.endswith("/posts"):
+            return {"data": pages.get(params["page"], []), "meta": {"total_pages": 1}}
+        return {"data": {"name": "Publication", "stats": {}}}
+
+    monkeypatch.setattr(beehiiv_client, "_get", fake_get)
+    result = beehiiv_client.publication_performance(
+        "pub_sanitized",
+        api_key="test-only",
+        start_at=dt.datetime(2026, 9, 8, tzinfo=dt.timezone.utc),
+        end_at=dt.datetime(2026, 9, 10, tzinfo=dt.timezone.utc),
+    )
+
+    assert [post["id"] for post in result["recent_posts"]] == ["inside"]

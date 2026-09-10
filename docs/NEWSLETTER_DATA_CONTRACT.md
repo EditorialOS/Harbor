@@ -47,3 +47,12 @@ publication resource exposed by that API. Completed broadcast stats map to
 issues; account subscriber counts, date-bounded growth, and tags map to the
 publication. Metrics Kit does not return—such as delivered count, unique opens,
 and spam reports—are explicitly `not_supported`, never zero.
+
+## Time windows
+
+Newsletter requests accept `today`, `yesterday`, `last_7_days`, `week`,
+`month`, `last_30_days`, `quarter`, `last_90_days`, `six_months`, `ytd`,
+`previous_year`, or an inclusive custom date range. Harbor resolves customer
+dates in the tenant timezone and stores explicit UTC start/end timestamps. The
+end timestamp is exclusive. Bounded runs also fetch a prior equal-duration
+window; YTD compares with the same elapsed period in the prior year.

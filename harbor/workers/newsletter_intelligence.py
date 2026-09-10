@@ -21,6 +21,7 @@ from ..newsletter_model import (
     NewsletterPublication,
 )
 from ..reporting import ensure_workspace, write_report, write_run
+from ..time_ranges import comparison_window, resolve_date_window
 from ..worker import WorkerResult, register
 
 _STATE_FILE = "newsletter-intelligence.json"
@@ -244,12 +245,22 @@ def _change_sentence(label: str, current: Any, prior: Any, *, rate: bool = False
 
 
 def _derive(
-    data: dict[str, Any], previous_snapshot: dict[str, Any] | None = None
+    data: dict[str, Any],
+    previous_snapshot: dict[str, Any] | None = None,
+    comparison_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     posts = [post for post in data.get("recent_posts", []) if isinstance(post, dict)]
     latest = posts[0] if posts else {}
     previous_post = posts[1] if len(posts) > 1 else {}
-    prior_posts = posts[1:]
+    prior_posts = (
+        [
+            post
+            for post in comparison_data.get("recent_posts", [])
+            if isinstance(post, dict)
+        ]
+        if comparison_data is not None
+        else posts[1:]
+    )
     best_open, weakest_open = _rank(posts, "open_rate")
     best_click, weakest_click = _rank(posts, "click_rate")
 
@@ -257,13 +268,48 @@ def _derive(
     recent_click_baseline = _mean(prior_posts, "click_rate")
     open_baseline = recent_open_baseline if recent_open_baseline is not None else data.get("avg_open_rate")
     click_baseline = recent_click_baseline if recent_click_baseline is not None else data.get("avg_click_rate")
-    open_baseline_label = "prior recent sends" if recent_open_baseline is not None else "publication baseline"
-    click_baseline_label = "prior recent sends" if recent_click_baseline is not None else "publication baseline"
+    comparison_label = (
+        (comparison_data or {}).get("window", {}).get("label")
+        if comparison_data is not None
+        else None
+    )
+    open_baseline_label = (
+        comparison_label or "prior recent sends"
+        if recent_open_baseline is not None
+        else "publication baseline"
+    )
+    click_baseline_label = (
+        comparison_label or "prior recent sends"
+        if recent_click_baseline is not None
+        else "publication baseline"
+    )
     open_delta, open_label = _delta(latest.get("open_rate"), open_baseline)
     click_delta, click_label = _delta(latest.get("click_rate"), click_baseline)
 
     prior_latest = (previous_snapshot or {}).get("latest_post") or {}
     what_changed: list[str] = []
+    if comparison_data is not None:
+        what_changed.extend(
+            [
+                _change_sentence(
+                    "Issues sent",
+                    data.get("total_sent"),
+                    comparison_data.get("total_sent"),
+                ),
+                _change_sentence(
+                    "Average open rate",
+                    data.get("avg_open_rate"),
+                    comparison_data.get("avg_open_rate"),
+                    rate=True,
+                ),
+                _change_sentence(
+                    "Average click rate",
+                    data.get("avg_click_rate"),
+                    comparison_data.get("avg_click_rate"),
+                    rate=True,
+                ),
+            ]
+        )
     if previous_snapshot is None:
         what_changed.append("This is Harbor’s first saved snapshot; subscriber movement will be available after the next run.")
     else:
@@ -373,6 +419,8 @@ def _derive(
         "audience_signals": audience_signals,
         "recommendations": recommendations[:5],
         "anomalies": anomalies,
+        "window": data.get("window"),
+        "comparison_window": (comparison_data or {}).get("window"),
     }
 
 
@@ -475,15 +523,38 @@ class NewsletterIntelligenceWorker:
             issue_limit = int(
                 inputs.get("recent_posts") or connection.settings.get("recent_posts", 10)
             )
+            timeframe = inputs.get("timeframe")
+            window = (
+                resolve_date_window(
+                    str(timeframe),
+                    timezone=tenant.timezone,
+                    start_date=inputs.get("start_date"),
+                    end_date=inputs.get("end_date"),
+                )
+                if timeframe is not None
+                else DateWindow(label="latest")
+            )
+            request = NewsletterRequest(
+                window=window,
+                publication_ids=tuple(str(item) for item in (requested_ids or [])),
+                issue_limit=issue_limit,
+                allow_mock=allow_mock,
+            )
             dataset = connector.sync(
                 connection,
-                NewsletterRequest(
-                    window=DateWindow(label="latest"),
-                    publication_ids=tuple(str(item) for item in (requested_ids or [])),
-                    issue_limit=issue_limit,
-                    allow_mock=allow_mock,
-                ),
+                request,
             )
+            comparison_dataset = None
+            if window.start is not None and window.end is not None:
+                comparison_dataset = connector.sync(
+                    connection,
+                    NewsletterRequest(
+                        window=comparison_window(window),
+                        publication_ids=request.publication_ids,
+                        issue_limit=issue_limit,
+                        allow_mock=allow_mock,
+                    ),
+                )
         except (ConfigError, ConnectorError, TypeError, ValueError) as error:
             return WorkerResult(self.id, "failed", str(error))
         if len(dataset.publications) != 1:
@@ -494,9 +565,20 @@ class NewsletterIntelligenceWorker:
             )
         publication = dataset.publications[0]
         data = _analysis_view(publication)
+        data["window"] = dataset.window.to_dict()
         data["_mock"] = dataset.mock
+        comparison_data = None
+        if comparison_dataset is not None:
+            if len(comparison_dataset.publications) != 1:
+                return WorkerResult(
+                    self.id,
+                    "failed",
+                    "comparison analysis requires exactly one selected publication",
+                )
+            comparison_data = _analysis_view(comparison_dataset.publications[0])
+            comparison_data["window"] = comparison_dataset.window.to_dict()
         previous_snapshot = _load_previous_snapshot(tenant.workspace, run_id)
-        derived = _derive(data, previous_snapshot)
+        derived = _derive(data, previous_snapshot, comparison_data)
         report = _markdown(tenant, data, derived)
         report_path = write_report(tenant.workspace, "newsletter-intelligence", report, artifact_id=run_id)
         run_record = {
@@ -510,6 +592,9 @@ class NewsletterIntelligenceWorker:
             "source": f"{publication.provider}-api" if not dataset.mock else f"{publication.provider}-mock",
             "metrics": data,
             "newsletter_data": dataset.to_dict(),
+            "comparison_newsletter_data": (
+                comparison_dataset.to_dict() if comparison_dataset is not None else None
+            ),
             "intelligence": derived,
         }
         run_path = write_run(tenant.workspace, run_record, run_id)
@@ -524,6 +609,11 @@ class NewsletterIntelligenceWorker:
             data={
                 "metrics": data,
                 "newsletter_data": dataset.to_dict(),
+                "comparison_newsletter_data": (
+                    comparison_dataset.to_dict()
+                    if comparison_dataset is not None
+                    else None
+                ),
                 "derived": derived,
                 "intelligence": derived,
                 "run_record": run_path,

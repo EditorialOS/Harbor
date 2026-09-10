@@ -174,3 +174,37 @@ def test_snapshot_comparison_is_stable_when_same_run_is_retried(tmp_path, monkey
     assert state["current"]["run_id"] == "run_retry_safe"
     assert state["previous"] is None
     assert "email" not in json.dumps(state).lower()
+
+
+def test_explicit_timeframe_fetches_current_and_prior_period(tmp_path, monkeypatch):
+    tenant = _tenant(tmp_path)
+    windows = []
+
+    def performance(*args, **kwargs):
+        windows.append((kwargs["start_at"], kwargs["end_at"]))
+        return _performance(
+            subscribers=100,
+            latest_id=f"post_{len(windows)}",
+            open_rate=0.50 if len(windows) == 1 else 0.40,
+            click_rate=0.06 if len(windows) == 1 else 0.04,
+        )
+
+    monkeypatch.setattr(
+        "harbor.connectors.beehiiv.beehiiv_client.publication_performance",
+        performance,
+    )
+    result = run_worker(
+        tenant,
+        "newsletter-intelligence",
+        {"_harbor_run_id": "run_month", "timeframe": "month"},
+    )
+
+    assert result.status == "completed"
+    assert len(windows) == 2
+    assert windows[0][0] == windows[1][1]
+    assert result.data["newsletter_data"]["window"]["label"] == "month"
+    assert (
+        result.data["comparison_newsletter_data"]["window"]["label"]
+        == "prior_month"
+    )
+    assert result.data["intelligence"]["trends"][0]["baseline_label"] == "prior_month"

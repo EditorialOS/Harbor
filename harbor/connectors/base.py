@@ -25,8 +25,8 @@ class NewsletterRequest:
     allow_mock: bool = False
 
     def __post_init__(self) -> None:
-        if self.issue_limit < 1 or self.issue_limit > 100:
-            raise ValueError("issue_limit must be between 1 and 100")
+        if self.issue_limit < 1 or self.issue_limit > 1000:
+            raise ValueError("issue_limit must be between 1 and 1000")
 
 
 class DataConnector(Protocol):

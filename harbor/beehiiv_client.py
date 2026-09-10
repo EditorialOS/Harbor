@@ -8,6 +8,7 @@ Mock data is opt-in; production never silently substitutes fake metrics.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import urllib.error
@@ -65,6 +66,80 @@ def _get(path, params=None, *, api_key: str | None, base_url: str = BEEHIIV_BASE
         raise BeehiivError("beehiiv_unreachable", str(e))
 
 
+def _timestamp(value: Any) -> dt.datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return dt.datetime.fromtimestamp(value, tz=dt.timezone.utc)
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate.isdigit():
+            return dt.datetime.fromtimestamp(int(candidate), tz=dt.timezone.utc)
+        try:
+            parsed = dt.datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc)
+    return None
+
+
+def _post_rows(
+    pub_id: str,
+    limit: int,
+    *,
+    api_key: str | None,
+    base_url: str,
+    auth_mode: str,
+    start_at: dt.datetime | None,
+    end_at: dt.datetime | None,
+) -> list[dict[str, Any]]:
+    """Fetch and locally bound Beehiiv's newest-first post pages."""
+    rows: list[dict[str, Any]] = []
+    page = 1
+    while len(rows) < limit:
+        response = _get(
+            f"/publications/{pub_id}/posts",
+            {
+                "expand[]": "stats",
+                "limit": min(100, limit - len(rows)),
+                "page": page,
+                "order_by": "created",
+                "direction": "desc",
+            },
+            api_key=api_key,
+            base_url=base_url,
+            auth_mode=auth_mode,
+        )
+        current = response.get("data", [])
+        if not isinstance(current, list):
+            raise BeehiivError("invalid_provider_response", "posts are invalid")
+        reached_start = False
+        for post in current:
+            if not isinstance(post, dict):
+                continue
+            published = _timestamp(post.get("displayed_date") or post.get("created"))
+            if start_at is not None and published is not None and published < start_at:
+                reached_start = True
+                continue
+            if end_at is not None and published is not None and published >= end_at:
+                continue
+            rows.append(post)
+            if len(rows) >= limit:
+                break
+        pagination = response.get("meta") or response.get("pagination") or {}
+        total_pages = pagination.get("total_pages") if isinstance(pagination, dict) else None
+        if reached_start or len(rows) >= limit or not current:
+            break
+        if total_pages is not None and page >= int(total_pages):
+            break
+        if len(current) < min(100, limit - len(rows)) and total_pages is None:
+            break
+        page += 1
+    return rows
+
+
 def publication_performance(
     pub_id: str,
     recent_posts: int = 5,
@@ -73,6 +148,8 @@ def publication_performance(
     base_url: str | None = None,
     auth_mode: str = "bearer",
     allow_mock: bool = False,
+    start_at: dt.datetime | None = None,
+    end_at: dt.datetime | None = None,
 ) -> dict:
     api_key = api_key or os.environ.get("BEEHIIV_API_KEY")
     if allow_mock:
@@ -85,15 +162,17 @@ def publication_performance(
     pdata = pub.get("data", pub)
     stats = pdata.get("stats", {}) or {}
 
-    posts = _get(
-        f"/publications/{pub_id}/posts",
-        {"expand[]": "stats", "limit": recent_posts, "order_by": "created", "direction": "desc"},
+    posts = _post_rows(
+        pub_id,
+        recent_posts,
         api_key=api_key,
         base_url=base_url,
         auth_mode=auth_mode,
+        start_at=start_at,
+        end_at=end_at,
     )
     post_rows = []
-    for p in posts.get("data", []):
+    for p in posts:
         s = (p.get("stats", {}) or {}).get("email", {}) or {}
         w = (p.get("stats", {}) or {}).get("web", {}) or {}
         post_rows.append({
