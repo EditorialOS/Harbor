@@ -41,3 +41,9 @@ Intelligence.
 The Beehiiv adapter preserves the existing Sprite Connector credential path and
 legacy single-publication configuration while persisting the normalized dataset
 with each run.
+
+The Kit adapter targets API v4 and treats the authenticated Kit account as the
+publication resource exposed by that API. Completed broadcast stats map to
+issues; account subscriber counts, date-bounded growth, and tags map to the
+publication. Metrics Kit does not return—such as delivered count, unique opens,
+and spam reports—are explicitly `not_supported`, never zero.

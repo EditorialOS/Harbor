@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from ..config import ConfigError, ConnectionConfig, TenantConfig
 from ..connectors import ConnectorError, NewsletterRequest, connector_for
 from ..connectors import beehiiv as _beehiiv_connector  # noqa: F401
+from ..connectors import kit as _kit_connector  # noqa: F401
 from ..newsletter_model import (
     DateWindow,
     MetricState,

@@ -10,6 +10,7 @@ from pathlib import Path
 from .config import ConfigError
 from .connectors import ConnectorError, connector_for
 from .connectors import beehiiv as _beehiiv_connector  # noqa: F401
+from .connectors import kit as _kit_connector  # noqa: F401
 from .sprite_entrypoint import tenant_from_spec
 
 
