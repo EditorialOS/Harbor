@@ -48,9 +48,11 @@ identifiers, recipient addresses, or customer report content.
 
 ## v1 release-candidate deployment
 
-- Deployed package version: `1.0.0rc4`
-- Fly app and scheduler Machine version: 24
-- Fly image: `deployment-01M24QR3NWGRDJZW0F3HN8KEYH`
+- Deployed package version: `1.0.0rc5`
+- Fly app and scheduler Machine version: 25
+- Fly image: `deployment-01M24S9YH64TTTNKWGWZKD0KFP`
+- Fly image digest:
+  `sha256:21e3e16b6b8edfa8c0ea66da729d1ea3669989d1665b35f228c9b58cffe61444`
 - Database schema version: 12
 - `/healthz`, `/readyz`, `/status`, `/metrics`, `/privacy`, `/terms`,
   `/support`, and `/signup`: passed
@@ -68,8 +70,14 @@ identifiers, recipient addresses, or customer report content.
   `800e4766e2c2defe92a9e34a4312bf509985ac0466fc02b8171bb2229089f42c`
 - Production mock marker: absent
 - Repeating the release-check idempotency key: duplicate suppressed
-- Local complete suite with disposable PostgreSQL 16: 104 passed
+- Local complete suite with disposable PostgreSQL 16: 105 passed
 - Local and Fly remote production image builds: passed
+- Public MCP tool inputs and outputs now publish bounded, explicit schemas:
+  passed
+- Public MCP responses omit tenant identifiers, provider post identifiers, and
+  internal delivery/provider-message identifiers: passed
+- The worker-run tool now declares its persisted-write, external-source, email,
+  destructive, open-world, and idempotency behavior for review: passed
 - ChatGPT selected and mounted the `harbor_dashboard` MCP Apps resource: passed
 - The first live dashboard render exposed a missing MCP Apps initialization
   handshake; the standards-compliant handshake was deployed in rc.2.
