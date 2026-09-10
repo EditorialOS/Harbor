@@ -72,8 +72,10 @@ identifiers, recipient addresses, or customer report content.
 - Local and Fly remote production image builds: passed
 - ChatGPT selected and mounted the `harbor_dashboard` MCP Apps resource: passed
 - The first live dashboard render exposed a missing MCP Apps initialization
-  handshake; the standards-compliant handshake is deployed in rc.2 and awaits
-  a refreshed live ChatGPT render check.
+  handshake; the standards-compliant handshake was deployed in rc.2.
+- Refreshed ChatGPT connection rendered the tenant-scoped editorial dashboard,
+  connection state, Today intelligence, metrics, recommendations, and anomalies:
+  visibly confirmed.
 
 ## Second-tenant isolation
 
