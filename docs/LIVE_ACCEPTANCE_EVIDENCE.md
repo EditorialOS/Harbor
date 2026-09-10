@@ -48,9 +48,9 @@ identifiers, recipient addresses, or customer report content.
 
 ## v1 release-candidate deployment
 
-- Deployed package version: `1.0.0rc2`
-- Fly app and scheduler Machine version: 22
-- Fly image: `deployment-01M247MKCF1DS38J6ZB3CVFZTB`
+- Deployed package version: `1.0.0rc3`
+- Fly app and scheduler Machine version: 23
+- Fly image: `deployment-01M24PEQ9V6SVF7190SC0V3SG5`
 - Database schema version: 12
 - `/healthz`, `/readyz`, `/status`, `/metrics`, `/privacy`, `/terms`,
   `/support`, and `/signup`: passed
@@ -76,6 +76,9 @@ identifiers, recipient addresses, or customer report content.
 - Refreshed ChatGPT connection rendered the tenant-scoped editorial dashboard,
   connection state, Today intelligence, metrics, recommendations, and anomalies:
   visibly confirmed.
+- The rc.3 ChatGPT resource replaces the multi-tab dashboard with a concise,
+  white intelligence card and hands deeper analysis to the conversation below:
+  deployed; live visual confirmation pending.
 
 ## Second-tenant isolation
 
