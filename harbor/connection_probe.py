@@ -7,8 +7,9 @@ import datetime as dt
 import json
 from pathlib import Path
 
-from . import beehiiv_client
 from .config import ConfigError
+from .connectors import ConnectorError, connector_for
+from .connectors import beehiiv as _beehiiv_connector  # noqa: F401
 from .sprite_entrypoint import tenant_from_spec
 
 
@@ -18,32 +19,24 @@ def probe(spec: dict) -> dict:
     try:
         tenant = tenant_from_spec(spec)
         connection = tenant.connection(provider)
-        if provider != "beehiiv":
-            raise ConfigError(f"unsupported connection provider '{provider}'")
+        connector = connector_for("newsletter", provider)
         publication_id = connection.settings.get("publication_id")
         if not publication_id:
-            publications = beehiiv_client.list_publications(
-                base_url=connection.settings.get("gateway_base_url"),
-                auth_mode=connection.settings.get("auth_mode", "bearer"),
-            )
+            publications = connector.discover(connection)
             return {
                 "status": "selection_required" if len(publications) > 1 else "discovered",
                 "provider": provider,
                 "checked_at": checked_at,
                 "publications": publications,
             }
-        metadata = beehiiv_client.verify_publication(
-            publication_id,
-            base_url=connection.settings.get("gateway_base_url"),
-            auth_mode=connection.settings.get("auth_mode", "bearer"),
-        )
+        metadata = connector.verify(connection, publication_id)
         return {
             "status": "verified",
             "provider": provider,
             "checked_at": checked_at,
             **metadata,
         }
-    except beehiiv_client.BeehiivError as error:
+    except ConnectorError as error:
         return {
             "status": "failed",
             "provider": provider,

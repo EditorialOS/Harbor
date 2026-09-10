@@ -32,7 +32,9 @@ def test_probe_returns_safe_verified_metadata(monkeypatch):
             "organization_name": "Acme",
         }
 
-    monkeypatch.setattr(connection_probe.beehiiv_client, "verify_publication", verify)
+    monkeypatch.setattr(
+        "harbor.connectors.beehiiv.beehiiv_client.verify_publication", verify
+    )
     result = connection_probe.probe(_spec())
     assert result["status"] == "verified"
     assert result["publication_name"] == "Example newsletter"
@@ -41,11 +43,13 @@ def test_probe_returns_safe_verified_metadata(monkeypatch):
 
 def test_probe_surfaces_provider_failure(monkeypatch):
     def fail(*args, **kwargs):
-        raise connection_probe.beehiiv_client.BeehiivError(
+        raise connection_probe._beehiiv_connector.beehiiv_client.BeehiivError(
             "beehiiv_http_error", "401 unauthorized"
         )
 
-    monkeypatch.setattr(connection_probe.beehiiv_client, "verify_publication", fail)
+    monkeypatch.setattr(
+        "harbor.connectors.beehiiv.beehiiv_client.verify_publication", fail
+    )
     result = connection_probe.probe(_spec())
     assert result == {
         "status": "failed",
@@ -60,7 +64,7 @@ def test_probe_discovers_publications_without_requiring_customer_ids(monkeypatch
     del spec["connections"][0]["settings"]["publication_id"]
 
     monkeypatch.setattr(
-        connection_probe.beehiiv_client,
+        connection_probe._beehiiv_connector.beehiiv_client,
         "list_publications",
         lambda **kwargs: [
             {"id": "pub_one", "name": "First"},

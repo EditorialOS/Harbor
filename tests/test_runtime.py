@@ -103,7 +103,7 @@ def test_zero_baseline_report_has_actionable_guidance(tmp_path, monkeypatch):
     tenant = load_tenant(_tenant(tmp_path))
 
     monkeypatch.setattr(
-        "harbor.workers.newsletter_intelligence.beehiiv_client.publication_performance",
+        "harbor.connectors.beehiiv.beehiiv_client.publication_performance",
         lambda *args, **kwargs: {
             "publication_id": "pub_test",
             "publication_name": "New publication",

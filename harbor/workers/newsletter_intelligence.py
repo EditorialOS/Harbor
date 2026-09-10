@@ -10,13 +10,130 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .. import beehiiv_client
-from ..config import TenantConfig
+from ..config import ConfigError, ConnectionConfig, TenantConfig
+from ..connectors import ConnectorError, NewsletterRequest, connector_for
+from ..connectors import beehiiv as _beehiiv_connector  # noqa: F401
+from ..newsletter_model import (
+    DateWindow,
+    MetricState,
+    MetricValue,
+    NewsletterPublication,
+)
 from ..reporting import ensure_workspace, write_report, write_run
-from ..secrets import resolve
 from ..worker import WorkerResult, register
 
 _STATE_FILE = "newsletter-intelligence.json"
+
+
+def _metric_value(metric: MetricValue) -> int | float | None:
+    return metric.value if metric.state is MetricState.AVAILABLE else None
+
+
+def _analysis_view(publication: NewsletterPublication) -> dict[str, Any]:
+    """Flatten normalized values for the existing evidence-analysis engine.
+
+    The persisted normalized dataset remains authoritative. This compatibility
+    view lets the proven Beehiiv analysis and UI continue working while making
+    its input provider-independent.
+    """
+    posts: list[dict[str, Any]] = []
+    for issue in publication.issues:
+        posts.append(
+            {
+                "id": issue.provider_id,
+                "title": issue.title,
+                "subject_line": issue.subject_line,
+                "published": issue.sent_at,
+                "audience": issue.audience,
+                "content_tags": list(issue.tags),
+                "recipients": _metric_value(issue.recipients),
+                "delivered": _metric_value(issue.delivered),
+                "open_rate": _metric_value(issue.open_rate),
+                "click_rate": _metric_value(issue.click_rate),
+                "opens": _metric_value(issue.opens),
+                "unique_opens": _metric_value(issue.unique_opens),
+                "clicks": _metric_value(issue.clicks),
+                "unique_clicks": _metric_value(issue.unique_clicks),
+                "unsubscribes": _metric_value(issue.unsubscribes),
+                "unsubscribe_rate": _metric_value(issue.unsubscribe_rate),
+                "spam_reports": _metric_value(issue.spam_reports),
+                "web_views": _metric_value(issue.web_views),
+                "web_clicks": _metric_value(issue.web_clicks),
+                "metric_states": {
+                    name: getattr(issue, name).to_dict()
+                    for name in (
+                        "recipients",
+                        "delivered",
+                        "open_rate",
+                        "click_rate",
+                        "opens",
+                        "unique_opens",
+                        "clicks",
+                        "unique_clicks",
+                        "unsubscribes",
+                        "unsubscribe_rate",
+                        "spam_reports",
+                        "web_views",
+                        "web_clicks",
+                    )
+                },
+            }
+        )
+    return {
+        "provider": publication.provider,
+        "connection_id": publication.connection_id,
+        "publication_id": publication.provider_id,
+        "publication_name": publication.name,
+        "active_subscribers": _metric_value(publication.subscribers),
+        "active_free_subscribers": _metric_value(publication.free_subscribers),
+        "active_premium_subscribers": _metric_value(publication.paid_subscribers),
+        "total_subscribers": _metric_value(publication.total_subscribers),
+        "total_sent": _metric_value(publication.sends),
+        "avg_open_rate": _metric_value(publication.average_open_rate),
+        "avg_click_rate": _metric_value(publication.average_click_rate),
+        "recent_posts": posts,
+        "metric_states": {
+            name: getattr(publication, name).to_dict()
+            for name in (
+                "subscribers",
+                "free_subscribers",
+                "paid_subscribers",
+                "total_subscribers",
+                "subscriber_growth",
+                "sends",
+                "average_open_rate",
+                "average_click_rate",
+            )
+        },
+    }
+
+
+def _select_connection(
+    tenant: TenantConfig, inputs: dict[str, Any]
+) -> tuple[ConnectionConfig, Any]:
+    requested_connection = inputs.get("connection_id")
+    requested_provider = inputs.get("provider")
+    candidates: list[tuple[ConnectionConfig, Any]] = []
+    for connection in tenant.connections:
+        if requested_connection and connection.id != requested_connection:
+            continue
+        if requested_provider and connection.provider != requested_provider:
+            continue
+        try:
+            connector = connector_for("newsletter", connection.provider)
+        except ConnectorError:
+            continue
+        candidates.append((connection, connector))
+    if not candidates:
+        qualifier = requested_connection or requested_provider or "newsletter"
+        raise ConfigError(
+            f"tenant '{tenant.tenant_id}' has no supported '{qualifier}' connection"
+        )
+    if requested_connection is None and requested_provider is None and len(candidates) > 1:
+        raise ConfigError(
+            "multiple newsletter connections are available; select a connection or portfolio"
+        )
+    return candidates[0]
 
 
 def _pct(value: Any) -> str:
@@ -94,7 +211,7 @@ def _load_previous_snapshot(workspace: str, run_id: str) -> dict[str, Any] | Non
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError("Newsletter Intelligence history is unreadable") from error
     if not isinstance(state, dict) or not isinstance(state.get("current"), dict):
-        raise RuntimeError("Newsletter Intelligence history is invalid")
+        raise TypeError("Newsletter Intelligence history is invalid")
     if state["current"].get("run_id") == run_id:
         previous = state.get("previous")
         return previous if isinstance(previous, dict) else None
@@ -327,9 +444,9 @@ def _markdown(tenant: TenantConfig, data: dict[str, Any], derived: dict[str, Any
         "",
         "---",
         (
-            f"Source: explicitly requested beehiiv mock data for publication {data.get('publication_id') or 'unknown'}."
+            f"Source: explicitly requested {data.get('provider') or 'newsletter'} mock data for publication {data.get('publication_id') or 'unknown'}."
             if data.get("_mock")
-            else f"Source: live beehiiv data retrieved for publication {data.get('publication_id') or 'unknown'}."
+            else f"Source: live {data.get('provider') or 'newsletter'} data retrieved for publication {data.get('publication_id') or 'unknown'}."
         ),
         "Harbor · Newsletter Intelligence",
     ]
@@ -345,25 +462,38 @@ class NewsletterIntelligenceWorker:
         if not tenant.worker_enabled(self.id):
             return WorkerResult(self.id, "disabled", "Worker is not enabled for this tenant.")
 
-        conn = tenant.connection("beehiiv")
-        auth_mode = conn.settings.get("auth_mode", "bearer")
-        api_key = resolve(conn.secret_ref, required=False) if auth_mode == "bearer" else None
-        publication_id = inputs.get("publication_id") or conn.settings.get("publication_id")
-        if not publication_id:
-            return WorkerResult(self.id, "failed", "beehiiv publication_id is missing")
-
         run_id = inputs.get("_harbor_run_id") or f"run_{dt.datetime.now(dt.timezone.utc):%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
-        recent_posts = int(inputs.get("recent_posts") or conn.settings.get("recent_posts", 10))
-        base_url = conn.settings.get("gateway_base_url") or conn.settings.get("base_url")
         allow_mock = str(inputs.get("mode", "")).lower() == "mock"
-        data = beehiiv_client.publication_performance(
-            publication_id,
-            recent_posts,
-            api_key=api_key,
-            base_url=base_url,
-            auth_mode=auth_mode,
-            allow_mock=allow_mock,
-        )
+        try:
+            connection, connector = _select_connection(tenant, inputs)
+            requested_ids = inputs.get("publication_ids")
+            if requested_ids is None and inputs.get("publication_id"):
+                requested_ids = [inputs["publication_id"]]
+            if requested_ids is not None and not isinstance(requested_ids, list):
+                raise ValueError("publication_ids must be a list")
+            issue_limit = int(
+                inputs.get("recent_posts") or connection.settings.get("recent_posts", 10)
+            )
+            dataset = connector.sync(
+                connection,
+                NewsletterRequest(
+                    window=DateWindow(label="latest"),
+                    publication_ids=tuple(str(item) for item in (requested_ids or [])),
+                    issue_limit=issue_limit,
+                    allow_mock=allow_mock,
+                ),
+            )
+        except (ConfigError, ConnectorError, TypeError, ValueError) as error:
+            return WorkerResult(self.id, "failed", str(error))
+        if len(dataset.publications) != 1:
+            return WorkerResult(
+                self.id,
+                "failed",
+                "publication analysis requires exactly one selected publication",
+            )
+        publication = dataset.publications[0]
+        data = _analysis_view(publication)
+        data["_mock"] = dataset.mock
         previous_snapshot = _load_previous_snapshot(tenant.workspace, run_id)
         derived = _derive(data, previous_snapshot)
         report = _markdown(tenant, data, derived)
@@ -376,8 +506,9 @@ class NewsletterIntelligenceWorker:
             "status": "completed",
             "mock": bool(data.get("_mock")),
             "report": report_path,
-            "source": "beehiiv-api" if not data.get("_mock") else "beehiiv-mock",
+            "source": f"{publication.provider}-api" if not dataset.mock else f"{publication.provider}-mock",
             "metrics": data,
+            "newsletter_data": dataset.to_dict(),
             "intelligence": derived,
         }
         run_path = write_run(tenant.workspace, run_record, run_id)
@@ -389,7 +520,13 @@ class NewsletterIntelligenceWorker:
             worker_id=self.id,
             status="completed",
             summary=derived["headline"],
-            data={"metrics": data, "derived": derived, "intelligence": derived, "run_record": run_path},
+            data={
+                "metrics": data,
+                "newsletter_data": dataset.to_dict(),
+                "derived": derived,
+                "intelligence": derived,
+                "run_record": run_path,
+            },
             deliverables=[report_path],
             warnings=warnings,
         )

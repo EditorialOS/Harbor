@@ -39,7 +39,10 @@ def test_sanitized_live_shape_through_sprite_connector(monkeypatch):
     assert result["recent_posts"][0] == {
         "id": "post_sanitized",
         "title": "Sanitized issue",
+        "subject_line": None,
         "published": "2026-09-05T12:00:00Z",
+        "audience": None,
+        "content_tags": [],
         "recipients": 0,
         "delivered": None,
         "open_rate": 0.0,

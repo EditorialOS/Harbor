@@ -99,7 +99,10 @@ def publication_performance(
         post_rows.append({
             "id": p.get("id"),
             "title": p.get("title"),
+            "subject_line": p.get("subject_line"),
             "published": p.get("displayed_date") or p.get("created"),
+            "audience": p.get("audience"),
+            "content_tags": p.get("content_tags") or [],
             "recipients": s.get("recipients"),
             "delivered": s.get("delivered"),
             "open_rate": _rate(s.get("open_rate")),

@@ -104,7 +104,7 @@ def test_report_contains_all_paid_product_sections_and_specific_real_signals(
         ]
     )
     monkeypatch.setattr(
-        "harbor.workers.newsletter_intelligence.beehiiv_client.publication_performance",
+        "harbor.connectors.beehiiv.beehiiv_client.publication_performance",
         lambda *args, **kwargs: next(responses),
     )
 
@@ -155,7 +155,7 @@ def test_snapshot_comparison_is_stable_when_same_run_is_retried(tmp_path, monkey
         click_rate=0.04,
     )
     monkeypatch.setattr(
-        "harbor.workers.newsletter_intelligence.beehiiv_client.publication_performance",
+        "harbor.connectors.beehiiv.beehiiv_client.publication_performance",
         lambda *args, **kwargs: data,
     )
     inputs = {
