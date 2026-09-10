@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from harbor import kit_client
 from harbor.config import load_tenant
 from harbor.runtime import run_worker
 
@@ -208,3 +209,105 @@ def test_explicit_timeframe_fetches_current_and_prior_period(tmp_path, monkeypat
         == "prior_month"
     )
     assert result.data["intelligence"]["trends"][0]["baseline_label"] == "prior_month"
+
+
+def test_portfolio_combines_beehiiv_and_kit_without_cross_provider_logic(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "portfolio.json"
+    config.write_text(
+        json.dumps(
+            {
+                "tenant_id": "portfolio-test",
+                "name": "Portfolio Test",
+                "timezone": "UTC",
+                "workspace": "workspace",
+                "workers": ["newsletter-intelligence"],
+                "connections": [
+                    {
+                        "id": "bee-main",
+                        "provider": "beehiiv",
+                        "settings": {
+                            "auth_mode": "sprite_connector",
+                            "publication_id": "pub_bee",
+                        },
+                    },
+                    {
+                        "id": "kit-main",
+                        "provider": "kit",
+                        "settings": {
+                            "auth_mode": "sprite_connector",
+                            "publication_id": "42",
+                        },
+                    },
+                ],
+            }
+        )
+    )
+    tenant = load_tenant(config)
+    monkeypatch.setattr(
+        "harbor.connectors.beehiiv.beehiiv_client.publication_performance",
+        lambda *args, **kwargs: {
+            **_performance(
+                subscribers=120,
+                latest_id="bee_issue",
+                open_rate=0.52,
+                click_rate=0.06,
+            ),
+            "publication_id": "pub_bee",
+            "publication_name": "Brand Daily",
+        },
+    )
+
+    def kit_get(path, params=None, **kwargs):
+        if path == "/account":
+            return {"account": {"id": 42, "name": "Executive Brief", "timezone": {}}}
+        if path == "/subscribers":
+            return {"subscribers": [], "pagination": {"total_count": 80}}
+        if path == "/account/growth_stats":
+            return {"stats": {"net_new_subscribers": 4}}
+        if path == "/tags":
+            return {"tags": [], "pagination": {"has_next_page": False}}
+        if path == "/broadcasts/stats":
+            return {
+                "broadcasts": [
+                    {
+                        "id": 700,
+                        "subject": "Executive signal",
+                        "send_at": "2026-09-09T12:00:00Z",
+                        "stats": {
+                            "recipients": 80,
+                            "open_rate": 40,
+                            "click_rate": 3,
+                            "emails_opened": 32,
+                            "total_clicks": 2,
+                            "unsubscribes": 0,
+                            "unsubscribe_rate": 0,
+                        },
+                    }
+                ],
+                "pagination": {"total_count": 1, "has_next_page": False},
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(kit_client, "_get", kit_get)
+    result = run_worker(
+        tenant,
+        "newsletter-intelligence",
+        {
+            "_harbor_run_id": "run_portfolio",
+            "view": "portfolio",
+            "timeframe": "last_7_days",
+        },
+    )
+
+    assert result.status == "completed"
+    assert len(result.data["newsletter_data"]["publications"]) == 2
+    assert result.data["metrics"]["active_subscribers"] == 200
+    assert result.data["metrics"]["publication_count"] == 2
+    assert result.data["intelligence"]["strongest_publication"]["publication_name"] == "Brand Daily"
+    report = Path(result.deliverables[0]).read_text()
+    assert "## Publication comparison" in report
+    assert "Brand Daily" in report
+    assert "Executive Brief" in report
+    assert "live portfolio data retrieved for 2 selected publications" in report

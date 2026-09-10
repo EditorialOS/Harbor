@@ -18,6 +18,7 @@ from ..newsletter_model import (
     DateWindow,
     MetricState,
     MetricValue,
+    NewsletterDataset,
     NewsletterPublication,
 )
 from ..reporting import ensure_workspace, write_report, write_run
@@ -48,6 +49,9 @@ def _analysis_view(publication: NewsletterPublication) -> dict[str, Any]:
                 "published": issue.sent_at,
                 "audience": issue.audience,
                 "content_tags": list(issue.tags),
+                "publication_id": publication.provider_id,
+                "publication_name": publication.name,
+                "provider": publication.provider,
                 "recipients": _metric_value(issue.recipients),
                 "delivered": _metric_value(issue.delivered),
                 "open_rate": _metric_value(issue.open_rate),
@@ -110,14 +114,21 @@ def _analysis_view(publication: NewsletterPublication) -> dict[str, Any]:
     }
 
 
-def _select_connection(
+def _select_connections(
     tenant: TenantConfig, inputs: dict[str, Any]
-) -> tuple[ConnectionConfig, Any]:
-    requested_connection = inputs.get("connection_id")
+) -> list[tuple[ConnectionConfig, Any]]:
+    requested_connections = inputs.get("connection_ids")
+    if requested_connections is None and inputs.get("connection_id"):
+        requested_connections = [inputs["connection_id"]]
+    if requested_connections is not None and not isinstance(requested_connections, list):
+        raise ValueError("connection_ids must be a list")
+    selected_connection_ids = {
+        str(item) for item in (requested_connections or []) if item is not None
+    }
     requested_provider = inputs.get("provider")
     candidates: list[tuple[ConnectionConfig, Any]] = []
     for connection in tenant.connections:
-        if requested_connection and connection.id != requested_connection:
+        if selected_connection_ids and connection.id not in selected_connection_ids:
             continue
         if requested_provider and connection.provider != requested_provider:
             continue
@@ -127,15 +138,100 @@ def _select_connection(
             continue
         candidates.append((connection, connector))
     if not candidates:
-        qualifier = requested_connection or requested_provider or "newsletter"
+        qualifier = ", ".join(sorted(selected_connection_ids)) or requested_provider or "newsletter"
         raise ConfigError(
             f"tenant '{tenant.tenant_id}' has no supported '{qualifier}' connection"
         )
-    if requested_connection is None and requested_provider is None and len(candidates) > 1:
-        raise ConfigError(
-            "multiple newsletter connections are available; select a connection or portfolio"
-        )
-    return candidates[0]
+    return candidates
+
+
+def _configured_publication_ids(connection: ConnectionConfig) -> tuple[str, ...]:
+    values = connection.settings.get("publication_ids") or []
+    legacy = connection.settings.get("publication_id")
+    result = tuple(str(item) for item in values if item is not None)
+    return result or ((str(legacy),) if legacy is not None else ())
+
+
+def _merge_datasets(
+    datasets: list[NewsletterDataset], window: DateWindow
+) -> NewsletterDataset:
+    publications = tuple(
+        publication
+        for dataset in datasets
+        for publication in dataset.publications
+    )
+    capabilities = sorted(
+        {capability for dataset in datasets for capability in dataset.capabilities}
+    )
+    warnings = tuple(warning for dataset in datasets for warning in dataset.warnings)
+    return NewsletterDataset(
+        window=window,
+        publications=publications,
+        capabilities=tuple(capabilities),
+        captured_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+        warnings=warnings,
+        mock=any(dataset.mock for dataset in datasets),
+    )
+
+
+def _sum_available(
+    publications: tuple[NewsletterPublication, ...], name: str
+) -> int | float | None:
+    values = [
+        float(metric.value)
+        for publication in publications
+        if (metric := getattr(publication, name)).state is MetricState.AVAILABLE
+    ]
+    return sum(values) if len(values) == len(publications) and values else None
+
+
+def _portfolio_view(publications: tuple[NewsletterPublication, ...]) -> dict[str, Any]:
+    views = [_analysis_view(publication) for publication in publications]
+    posts = [post for view in views for post in view["recent_posts"]]
+    open_values = [
+        (float(post["open_rate"]), int(post["recipients"]))
+        for post in posts
+        if post.get("open_rate") is not None and (post.get("recipients") or 0) > 0
+    ]
+    click_values = [
+        (float(post["click_rate"]), int(post["recipients"]))
+        for post in posts
+        if post.get("click_rate") is not None and (post.get("recipients") or 0) > 0
+    ]
+
+    def weighted(values: list[tuple[float, int]]) -> float | None:
+        weight = sum(item[1] for item in values)
+        return sum(value * count for value, count in values) / weight if weight else None
+
+    total_subscribers = _sum_available(publications, "subscribers")
+    return {
+        "provider": "portfolio",
+        "connection_id": "portfolio",
+        "publication_id": "portfolio",
+        "publication_name": "All publications",
+        "publication_count": len(publications),
+        "active_subscribers": total_subscribers,
+        "total_subscribers": _sum_available(publications, "total_subscribers"),
+        "active_free_subscribers": _sum_available(publications, "free_subscribers"),
+        "active_premium_subscribers": _sum_available(publications, "paid_subscribers"),
+        "subscriber_growth": _sum_available(publications, "subscriber_growth"),
+        "total_sent": _sum_available(publications, "sends"),
+        "avg_open_rate": weighted(open_values),
+        "avg_click_rate": weighted(click_values),
+        "recent_posts": sorted(
+            posts, key=lambda post: str(post.get("published") or ""), reverse=True
+        ),
+        "publications": views,
+        "metric_states": {
+            "subscribers": {
+                "value": total_subscribers,
+                "state": "available" if total_subscribers is not None else "no_data",
+                "detail": None
+                if total_subscribers is not None
+                else "Not all selected publications returned subscriber counts",
+            }
+        },
+    }
 
 
 def _pct(value: Any) -> str:
@@ -286,6 +382,23 @@ def _derive(
     open_delta, open_label = _delta(latest.get("open_rate"), open_baseline)
     click_delta, click_label = _delta(latest.get("click_rate"), click_baseline)
 
+    publication_views = [
+        item for item in data.get("publications", []) if isinstance(item, dict)
+    ]
+    ranked_publications = [
+        item for item in publication_views if item.get("avg_open_rate") is not None
+    ]
+    strongest_publication = (
+        max(ranked_publications, key=lambda item: float(item["avg_open_rate"]))
+        if ranked_publications
+        else {}
+    )
+    weakest_publication = (
+        min(ranked_publications, key=lambda item: float(item["avg_open_rate"]))
+        if len(ranked_publications) > 1
+        else {}
+    )
+
     prior_latest = (previous_snapshot or {}).get("latest_post") or {}
     what_changed: list[str] = []
     if comparison_data is not None:
@@ -339,6 +452,13 @@ def _derive(
     premium = data.get("active_premium_subscribers")
     if free is not None or premium is not None:
         audience_signals.append(f"Audience mix: {_count(free)} free and {_count(premium)} premium active subscribers.")
+    if publication_views:
+        for item in publication_views:
+            audience_signals.append(
+                f"{item.get('publication_name') or item.get('publication_id')}: "
+                f"{_count(item.get('active_subscribers'))} subscribers and "
+                f"{_count(item.get('total_sent'))} issue(s) in the selected period."
+            )
 
     anomalies: list[str] = []
     if not posts:
@@ -362,6 +482,16 @@ def _derive(
         anomalies.append(f"Latest open rate moved {abs(open_delta):.1%} {'above' if open_delta > 0 else 'below'} its comparison baseline.")
     if click_delta is not None and abs(click_delta) >= 0.03:
         anomalies.append(f"Latest click rate moved {abs(click_delta):.1%} {'above' if click_delta > 0 else 'below'} its comparison baseline.")
+    if strongest_publication and weakest_publication:
+        gap = float(strongest_publication["avg_open_rate"]) - float(
+            weakest_publication["avg_open_rate"]
+        )
+        if gap >= 0.05:
+            anomalies.append(
+                f"Portfolio open-rate spread is {gap:.1%}: "
+                f"{strongest_publication.get('publication_name')} leads "
+                f"{weakest_publication.get('publication_name')}."
+            )
 
     why_it_matters: list[str] = []
     if open_delta is None:
@@ -403,6 +533,15 @@ def _derive(
             recommendations.append(f"Review **{best_click.get('title') or 'the strongest click performer'}** for repeatable CTA and offer patterns.")
     if data.get("active_subscribers") == 0:
         recommendations.insert(0, "Build an initial active subscriber cohort before treating engagement rates as decision-grade.")
+    if strongest_publication and weakest_publication:
+        recommendations.insert(
+            0,
+            f"Review the issue and subject-line choices behind "
+            f"**{strongest_publication.get('publication_name')}** "
+            f"({_pct(strongest_publication.get('avg_open_rate'))} average opens) "
+            f"before planning the next **{weakest_publication.get('publication_name')}** issue "
+            f"({_pct(weakest_publication.get('avg_open_rate'))}).",
+        )
 
     headline = anomalies[0] if anomalies else why_it_matters[0] if why_it_matters else "Harbor collected the latest available newsletter performance."
     return {
@@ -413,6 +552,8 @@ def _derive(
         "weakest_open": weakest_open,
         "best_click": best_click,
         "weakest_click": weakest_click,
+        "strongest_publication": strongest_publication,
+        "weakest_publication": weakest_publication,
         "what_changed": what_changed,
         "why_it_matters": why_it_matters,
         "trends": trends,
@@ -421,6 +562,7 @@ def _derive(
         "anomalies": anomalies,
         "window": data.get("window"),
         "comparison_window": (comparison_data or {}).get("window"),
+        "view": "portfolio" if publication_views else "publication",
     }
 
 
@@ -448,7 +590,16 @@ def _content_lines(derived: dict[str, Any]) -> list[str]:
         ("Weakest click performer", derived["weakest_click"], "click_rate"),
     ):
         if post:
-            lines.append(f"{label}: **{post.get('title') or 'Untitled'}** at {_pct(post.get(metric))}.")
+            publication = (
+                post.get("publication_name")
+                if derived.get("view") == "portfolio"
+                else None
+            )
+            suffix = f" · {publication}" if publication else ""
+            lines.append(
+                f"{label}: **{post.get('title') or 'Untitled'}**{suffix} "
+                f"at {_pct(post.get(metric))}."
+            )
     return lines or ["Not enough recipient-backed post data is available to rank content."]
 
 
@@ -467,6 +618,20 @@ def _markdown(tenant: TenantConfig, data: dict[str, Any], derived: dict[str, Any
     ]
     if data.get("_mock"):
         lines += ["> Development mode: this report uses explicitly requested mock data.", ""]
+    portfolio_lines: list[str] = []
+    if data.get("publications"):
+        portfolio_lines = [
+            "## Publication comparison",
+            *[
+                f"- **{item.get('publication_name') or item.get('publication_id')}** "
+                f"({item.get('provider')}): {_count(item.get('active_subscribers'))} subscribers, "
+                f"{_count(item.get('total_sent'))} issues, "
+                f"{_pct(item.get('avg_open_rate'))} average opens, "
+                f"{_pct(item.get('avg_click_rate'))} average clicks."
+                for item in data["publications"]
+            ],
+            "",
+        ]
     lines += [
         f"**Today’s signal:** {derived['headline']}",
         "",
@@ -479,6 +644,7 @@ def _markdown(tenant: TenantConfig, data: dict[str, Any], derived: dict[str, Any
         "## Trends vs prior performance / baseline",
         *[f"- {_trend_line(item)}" for item in derived["trends"]],
         "",
+        *portfolio_lines,
         "## Strongest and weakest content",
         *[f"- {item}" for item in _content_lines(derived)],
         "",
@@ -495,7 +661,12 @@ def _markdown(tenant: TenantConfig, data: dict[str, Any], derived: dict[str, Any
         (
             f"Source: explicitly requested {data.get('provider') or 'newsletter'} mock data for publication {data.get('publication_id') or 'unknown'}."
             if data.get("_mock")
-            else f"Source: live {data.get('provider') or 'newsletter'} data retrieved for publication {data.get('publication_id') or 'unknown'}."
+            else f"Source: live {data.get('provider') or 'newsletter'} data retrieved for "
+            + (
+                f"{data.get('publication_count')} selected publications."
+                if data.get("publication_count")
+                else f"publication {data.get('publication_id') or 'unknown'}."
+            )
         ),
         "Harbor · Newsletter Intelligence",
     ]
@@ -514,14 +685,19 @@ class NewsletterIntelligenceWorker:
         run_id = inputs.get("_harbor_run_id") or f"run_{dt.datetime.now(dt.timezone.utc):%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
         allow_mock = str(inputs.get("mode", "")).lower() == "mock"
         try:
-            connection, connector = _select_connection(tenant, inputs)
+            selections = _select_connections(tenant, inputs)
             requested_ids = inputs.get("publication_ids")
             if requested_ids is None and inputs.get("publication_id"):
                 requested_ids = [inputs["publication_id"]]
             if requested_ids is not None and not isinstance(requested_ids, list):
                 raise ValueError("publication_ids must be a list")
+            requested_id_set = {str(item) for item in (requested_ids or [])}
             issue_limit = int(
-                inputs.get("recent_posts") or connection.settings.get("recent_posts", 10)
+                inputs.get("recent_posts")
+                or max(
+                    int(connection.settings.get("recent_posts", 10))
+                    for connection, _connector in selections
+                )
             )
             timeframe = inputs.get("timeframe")
             window = (
@@ -534,48 +710,79 @@ class NewsletterIntelligenceWorker:
                 if timeframe is not None
                 else DateWindow(label="latest")
             )
-            request = NewsletterRequest(
-                window=window,
-                publication_ids=tuple(str(item) for item in (requested_ids or [])),
-                issue_limit=issue_limit,
-                allow_mock=allow_mock,
-            )
-            dataset = connector.sync(
-                connection,
-                request,
-            )
+            datasets: list[NewsletterDataset] = []
+            comparison_datasets: list[NewsletterDataset] = []
+            selected_count = 0
+            for connection, connector in selections:
+                configured_ids = set(_configured_publication_ids(connection))
+                local_ids = requested_id_set & configured_ids
+                if requested_id_set and not local_ids:
+                    if len(selections) == 1:
+                        local_ids = requested_id_set
+                    else:
+                        continue
+                selected_count += 1
+                request = NewsletterRequest(
+                    window=window,
+                    publication_ids=tuple(sorted(local_ids)),
+                    issue_limit=issue_limit,
+                    allow_mock=allow_mock,
+                )
+                datasets.append(connector.sync(connection, request))
+                if window.start is not None and window.end is not None:
+                    comparison_datasets.append(
+                        connector.sync(
+                            connection,
+                            NewsletterRequest(
+                                window=comparison_window(window),
+                                publication_ids=request.publication_ids,
+                                issue_limit=issue_limit,
+                                allow_mock=allow_mock,
+                            ),
+                        )
+                    )
+            if not selected_count:
+                raise ConfigError("none of the requested publications are configured")
+            dataset = _merge_datasets(datasets, window)
             comparison_dataset = None
             if window.start is not None and window.end is not None:
-                comparison_dataset = connector.sync(
-                    connection,
-                    NewsletterRequest(
-                        window=comparison_window(window),
-                        publication_ids=request.publication_ids,
-                        issue_limit=issue_limit,
-                        allow_mock=allow_mock,
-                    ),
+                comparison_dataset = _merge_datasets(
+                    comparison_datasets, comparison_window(window)
                 )
         except (ConfigError, ConnectorError, TypeError, ValueError) as error:
             return WorkerResult(self.id, "failed", str(error))
-        if len(dataset.publications) != 1:
+        requested_view = str(inputs.get("view") or "").lower()
+        if requested_view not in {"", "publication", "portfolio"}:
+            return WorkerResult(self.id, "failed", "view must be publication or portfolio")
+        portfolio = requested_view == "portfolio" or (
+            not requested_view and len(dataset.publications) > 1
+        )
+        if not portfolio and len(dataset.publications) != 1:
             return WorkerResult(
                 self.id,
                 "failed",
                 "publication analysis requires exactly one selected publication",
             )
-        publication = dataset.publications[0]
-        data = _analysis_view(publication)
+        data = (
+            _portfolio_view(dataset.publications)
+            if portfolio
+            else _analysis_view(dataset.publications[0])
+        )
         data["window"] = dataset.window.to_dict()
         data["_mock"] = dataset.mock
         comparison_data = None
         if comparison_dataset is not None:
-            if len(comparison_dataset.publications) != 1:
+            if not portfolio and len(comparison_dataset.publications) != 1:
                 return WorkerResult(
                     self.id,
                     "failed",
                     "comparison analysis requires exactly one selected publication",
                 )
-            comparison_data = _analysis_view(comparison_dataset.publications[0])
+            comparison_data = (
+                _portfolio_view(comparison_dataset.publications)
+                if portfolio
+                else _analysis_view(comparison_dataset.publications[0])
+            )
             comparison_data["window"] = comparison_dataset.window.to_dict()
         previous_snapshot = _load_previous_snapshot(tenant.workspace, run_id)
         derived = _derive(data, previous_snapshot, comparison_data)
@@ -589,7 +796,16 @@ class NewsletterIntelligenceWorker:
             "status": "completed",
             "mock": bool(data.get("_mock")),
             "report": report_path,
-            "source": f"{publication.provider}-api" if not dataset.mock else f"{publication.provider}-mock",
+            "source": (
+                "portfolio-api"
+                if portfolio and not dataset.mock
+                else "portfolio-mock"
+                if portfolio
+                else f"{dataset.publications[0].provider}-api"
+                if not dataset.mock
+                else f"{dataset.publications[0].provider}-mock"
+            ),
+            "view": "portfolio" if portfolio else "publication",
             "metrics": data,
             "newsletter_data": dataset.to_dict(),
             "comparison_newsletter_data": (

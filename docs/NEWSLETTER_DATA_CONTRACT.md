@@ -56,3 +56,13 @@ Newsletter requests accept `today`, `yesterday`, `last_7_days`, `week`,
 dates in the tenant timezone and stores explicit UTC start/end timestamps. The
 end timestamp is exclusive. Bounded runs also fetch a prior equal-duration
 window; YTD compares with the same elapsed period in the prior year.
+
+## Publication and portfolio selection
+
+The same worker accepts one or more `connection_ids` and `publication_ids`.
+`view=publication` requires exactly one normalized publication. `view=portfolio`
+combines every selected provider without provider-specific analysis code. Total
+audience is only calculated when every selected publication returned an
+available subscriber count; engagement is recipient-weighted across comparable
+issues. Provider failures fail the portfolio run visibly rather than silently
+returning a partial portfolio.
