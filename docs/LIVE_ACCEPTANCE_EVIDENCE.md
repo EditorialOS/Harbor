@@ -80,8 +80,10 @@ identifiers, recipient addresses, or customer report content.
   card with explicit 32-pixel content padding, a lightweight report title,
   gray date, three metric columns, and three insight columns. Deeper analysis
   continues in the conversation below the card.
-- The rc.4 resource was locally rendered and measured before deployment; live
-  ChatGPT visual confirmation is pending.
+- The rc.4 resource was locally rendered and measured before deployment. The
+  deployed card was then refreshed in ChatGPT and its spacing, report/date
+  hierarchy, three metric columns, and three insight columns were visibly
+  confirmed by the pilot customer on September 9, 2026.
 
 ## Second-tenant isolation
 
