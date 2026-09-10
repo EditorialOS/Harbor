@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import secrets
 from dataclasses import dataclass
-from typing import Annotated, Any, NotRequired, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TypedDict
 from urllib.parse import urlsplit
 
 from mcp.server import MCPServer
@@ -28,6 +28,22 @@ from .tenant_store import RunRecord, TenantRecord, TenantStore, TenantStoreError
 from .worker import catalog as worker_catalog
 from .workers import alex as _alex  # noqa: F401
 from .workers import newsletter_intelligence as _newsletter  # noqa: F401
+
+Timeframe = Literal[
+    "today",
+    "yesterday",
+    "last_7_days",
+    "week",
+    "month",
+    "last_30_days",
+    "quarter",
+    "last_90_days",
+    "six_months",
+    "ytd",
+    "previous_year",
+    "custom",
+]
+NewsletterView = Literal["publication", "portfolio"]
 
 
 class PublicDelivery(TypedDict):
@@ -59,12 +75,16 @@ class PublicPost(TypedDict):
     unsubscribes: int | None
     spam_reports: int | None
     web_views: int | None
+    publication_id: NotRequired[str | None]
+    publication_name: NotRequired[str | None]
+    provider: NotRequired[str | None]
+    metric_states: NotRequired[dict[str, Any]]
 
 
 class PublicIntelligence(TypedDict):
     what_changed: list[str]
     why_it_matters: list[str]
-    trends: list[str]
+    trends: list[dict[str, Any]]
     audience_signals: list[str]
     recommendations: list[str]
     anomalies: list[str]
@@ -73,6 +93,10 @@ class PublicIntelligence(TypedDict):
     weakest_open: PublicPost | None
     strongest_click: PublicPost | None
     weakest_click: PublicPost | None
+    strongest_publication: NotRequired[dict[str, Any] | None]
+    weakest_publication: NotRequired[dict[str, Any] | None]
+    window: NotRequired[dict[str, Any] | None]
+    comparison_window: NotRequired[dict[str, Any] | None]
 
 
 class PublicMetrics(TypedDict):
@@ -83,6 +107,10 @@ class PublicMetrics(TypedDict):
     avg_open_rate: float | None
     avg_click_rate: float | None
     latest_post: PublicPost | None
+    publication_count: NotRequired[int | None]
+    publications: NotRequired[list[dict[str, Any]]]
+    window: NotRequired[dict[str, Any] | None]
+    metric_states: NotRequired[dict[str, Any]]
 
 
 class LatestIntelligence(TypedDict):
@@ -167,6 +195,12 @@ class RunWorkerOutput(TypedDict):
     finished_at: NotRequired[str | None]
     deliveries: NotRequired[list[PublicDelivery]]
     error: NotRequired[str | None]
+    latest_intelligence: NotRequired[LatestIntelligence | None]
+
+
+class IntelligenceQueryOutput(TypedDict):
+    found: bool
+    latest_intelligence: LatestIntelligence | None
 
 
 def _bearer(headers: Any) -> str:
@@ -227,7 +261,7 @@ def _public_run(record: RunRecord) -> PublicRun:
 def _safe_post(value: Any) -> PublicPost | None:
     if not isinstance(value, dict):
         return None
-    return {
+    result = {
         key: value.get(key)
         for key in (
             "title",
@@ -239,8 +273,15 @@ def _safe_post(value: Any) -> PublicPost | None:
             "unsubscribes",
             "spam_reports",
             "web_views",
+            "publication_id",
+            "publication_name",
+            "provider",
         )
     }
+    states = value.get("metric_states")
+    if isinstance(states, dict):
+        result["metric_states"] = states
+    return result
 
 
 def _safe_intelligence(result: dict[str, Any]) -> dict[str, Any] | None:
@@ -250,6 +291,19 @@ def _safe_intelligence(result: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(intelligence, dict) or not isinstance(metrics, dict):
         return None
     recent_posts = metrics.get("recent_posts") or []
+    normalized_publications = (
+        (data.get("newsletter_data") or {}).get("publications") or []
+    )
+    publication_summaries = metrics.get("publications") or [
+        {
+            "publication_id": item.get("provider_id"),
+            "publication_name": item.get("name"),
+            "provider": item.get("provider"),
+            "active_subscribers": ((item.get("metrics") or {}).get("subscribers") or {}).get("value"),
+        }
+        for item in normalized_publications
+        if isinstance(item, dict)
+    ]
     latest_post = _safe_post(
         intelligence.get("latest") or (recent_posts[0] if recent_posts else None)
     )
@@ -271,6 +325,14 @@ def _safe_intelligence(result: dict[str, Any]) -> dict[str, Any] | None:
     safe_intelligence["weakest_open"] = _safe_post(intelligence.get("weakest_open"))
     safe_intelligence["strongest_click"] = _safe_post(intelligence.get("best_click"))
     safe_intelligence["weakest_click"] = _safe_post(intelligence.get("weakest_click"))
+    safe_intelligence["strongest_publication"] = intelligence.get(
+        "strongest_publication"
+    ) or None
+    safe_intelligence["weakest_publication"] = intelligence.get(
+        "weakest_publication"
+    ) or None
+    safe_intelligence["window"] = intelligence.get("window")
+    safe_intelligence["comparison_window"] = intelligence.get("comparison_window")
     return {
         "metrics": {
             "publication_name": metrics.get("publication_name"),
@@ -280,29 +342,62 @@ def _safe_intelligence(result: dict[str, Any]) -> dict[str, Any] | None:
             "avg_open_rate": metrics.get("avg_open_rate"),
             "avg_click_rate": metrics.get("avg_click_rate"),
             "latest_post": latest_post,
+            "publication_count": metrics.get("publication_count"),
+            "publications": publication_summaries,
+            "window": metrics.get("window"),
+            "metric_states": metrics.get("metric_states") or {},
         },
         "intelligence": safe_intelligence,
     }
 
 
+def _latest_intelligence(
+    store: TenantStore,
+    tenant: TenantRecord,
+    *,
+    timeframe: str | None = None,
+    view: str | None = None,
+    provider: str | None = None,
+    publication_ids: set[str] | None = None,
+) -> LatestIntelligence | None:
+    for record in store.list_runs(tenant.tenant_id, limit=100):
+        if record.worker_id != "newsletter-intelligence" or record.status != "completed":
+            continue
+        result = record.result or {}
+        data = result.get("data") or {}
+        newsletter = data.get("newsletter_data") or {}
+        publications = newsletter.get("publications") or []
+        window = newsletter.get("window") or {}
+        if timeframe and window.get("label") != timeframe:
+            continue
+        actual_view = "portfolio" if len(publications) > 1 else "publication"
+        if view and actual_view != view:
+            continue
+        if provider and not any(item.get("provider") == provider for item in publications):
+            continue
+        if publication_ids:
+            actual_ids = {
+                str(item.get("provider_id"))
+                for item in publications
+                if item.get("provider_id") is not None
+            }
+            if not publication_ids.issubset(actual_ids):
+                continue
+        safe = _safe_intelligence(result)
+        if safe is None:
+            continue
+        return {
+            "run_id": record.run_id,
+            "summary": result.get("summary"),
+            "finished_at": record.finished_at,
+            **safe,
+        }
+    return None
+
+
 def _dashboard_payload(store: TenantStore, tenant: TenantRecord) -> DashboardOutput:
     runs = store.list_runs(tenant.tenant_id, limit=10)
-    latest = None
-    for record in runs:
-        if (
-            record.worker_id != "newsletter-intelligence"
-            or record.status != "completed"
-        ):
-            continue
-        safe = _safe_intelligence(record.result or {})
-        if safe is not None:
-            latest = {
-                "run_id": record.run_id,
-                "summary": (record.result or {}).get("summary"),
-                "finished_at": record.finished_at,
-                **safe,
-            }
-            break
+    latest = _latest_intelligence(store, tenant)
     enabled = set(tenant.config.get("workers", []))
     sources = [
         {
@@ -313,10 +408,7 @@ def _dashboard_payload(store: TenantStore, tenant: TenantRecord) -> DashboardOut
         }
         for item in tenant.config.get("connections", [])
     ]
-    beehiiv_ready = any(
-        source["provider"] == "beehiiv" and source["status"] == "verified"
-        for source in sources
-    )
+    newsletter_ready = any(source["status"] == "verified" for source in sources)
     return {
         "workspace": {
             "name": tenant.name,
@@ -324,7 +416,7 @@ def _dashboard_payload(store: TenantStore, tenant: TenantRecord) -> DashboardOut
             "sprite_provisioned": bool(tenant.sprite_name),
         },
         "connection_status": (
-            "ready" if tenant.sprite_name and beehiiv_ready else "needs_attention"
+            "ready" if tenant.sprite_name and newsletter_ready else "needs_attention"
         ),
         "sources": sources,
         "workers": [
@@ -590,6 +682,47 @@ def create_remote_mcp(
         }
 
     @server.tool(
+        name="harbor_newsletter_intelligence",
+        title="Get saved newsletter intelligence",
+        description=(
+            "Return the newest completed Newsletter Intelligence result matching an "
+            "optional timeframe, publication/portfolio view, provider, and publication "
+            "selection. This reads saved real-data results and never runs a worker. If "
+            "found is false, offer to run Newsletter Intelligence with the same selection."
+        ),
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            openWorldHint=False,
+            destructiveHint=False,
+        ),
+        meta={
+            "securitySchemes": read_security,
+            "ui": {"visibility": ["model", "app"]},
+            "openai/widgetAccessible": True,
+        },
+    )
+    def newsletter_intelligence(
+        ctx: Context,
+        timeframe: Timeframe | None = None,
+        view: NewsletterView | None = None,
+        provider: Annotated[
+            str | None, Field(pattern=r"^[a-z0-9][a-z0-9._-]*$")
+        ] = None,
+        publication_ids: Annotated[list[str] | None, Field(max_length=50)] = None,
+    ) -> IntelligenceQueryOutput:
+        """Read a matching saved newsletter intelligence result."""
+        tenant = _tenant_for_context(ctx, store)
+        latest = _latest_intelligence(
+            store,
+            tenant,
+            timeframe=timeframe,
+            view=view,
+            provider=provider,
+            publication_ids={str(item) for item in (publication_ids or [])},
+        )
+        return {"found": latest is not None, "latest_intelligence": latest}
+
+    @server.tool(
         name="harbor_run_worker",
         title="Run an enabled Harbor worker",
         description=(
@@ -611,6 +744,20 @@ def create_remote_mcp(
         worker_id: Annotated[str, Field(min_length=1, max_length=100)],
         idempotency_key: Annotated[str, Field(min_length=1, max_length=255)]
         | None = None,
+        timeframe: Timeframe | None = None,
+        view: NewsletterView | None = None,
+        provider: Annotated[
+            str | None, Field(pattern=r"^[a-z0-9][a-z0-9._-]*$")
+        ] = None,
+        connection_ids: Annotated[list[str] | None, Field(max_length=50)] = None,
+        publication_ids: Annotated[list[str] | None, Field(max_length=50)] = None,
+        start_date: Annotated[
+            str | None, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+        ] = None,
+        end_date: Annotated[
+            str | None, Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+        ] = None,
+        issue_limit: Annotated[int, Field(ge=1, le=1000)] = 100,
     ) -> RunWorkerOutput:
         """Run one enabled worker in the authenticated tenant's private Sprite."""
         tenant = _tenant_for_context(ctx, store)
@@ -622,6 +769,41 @@ def create_remote_mcp(
             raise ValueError("idempotency_key must contain 1 through 255 characters")
         if worker_id not in tenant.config.get("workers", []):
             raise PermissionError("worker is not enabled")
+        if worker_id != "newsletter-intelligence" and any(
+            value is not None
+            for value in (
+                timeframe,
+                view,
+                provider,
+                connection_ids,
+                publication_ids,
+                start_date,
+                end_date,
+            )
+        ):
+            raise ValueError("newsletter selection applies only to Newsletter Intelligence")
+        if timeframe == "custom" and (not start_date or not end_date):
+            raise ValueError("custom timeframe requires start_date and end_date")
+        if timeframe != "custom" and (start_date or end_date):
+            raise ValueError("start_date and end_date require timeframe=custom")
+        worker_input = (
+            {
+                key: value
+                for key, value in {
+                    "timeframe": timeframe,
+                    "view": view,
+                    "provider": provider,
+                    "connection_ids": connection_ids,
+                    "publication_ids": publication_ids,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                    "recent_posts": issue_limit,
+                }.items()
+                if value is not None
+            }
+            if worker_id == "newsletter-intelligence"
+            else {}
+        )
         runner = runner_factory()
         idem = idempotency_key or ("mcp_" + secrets.token_urlsafe(24))
         try:
@@ -630,14 +812,26 @@ def create_remote_mcp(
                 runner,
                 tenant,
                 worker_id,
-                {},
+                worker_input,
                 idem,
                 delivery_handler=DeliveryCoordinator(store, runner).deliver,
             )
         except DuplicateRun as error:
             if error.record is None:
                 raise TenantStoreError("duplicate run record was not found") from error
-            return {"duplicate_suppressed": True, **_public_run(error.record)}
+            duplicate: RunWorkerOutput = {
+                "duplicate_suppressed": True,
+                **_public_run(error.record),
+            }
+            safe = _safe_intelligence(error.record.result or {})
+            if safe is not None:
+                duplicate["latest_intelligence"] = {
+                    "run_id": error.record.run_id,
+                    "summary": (error.record.result or {}).get("summary"),
+                    "finished_at": error.record.finished_at,
+                    **safe,
+                }
+            return duplicate
         except RunExecutionFailed as error:
             return {
                 "run_id": error.run_id,
@@ -650,7 +844,16 @@ def create_remote_mcp(
             idem,
         )
         if record is not None:
-            return _public_run(record)
+            response: RunWorkerOutput = _public_run(record)
+            safe = _safe_intelligence(record.result or {})
+            if safe is not None:
+                response["latest_intelligence"] = {
+                    "run_id": record.run_id,
+                    "summary": (record.result or {}).get("summary"),
+                    "finished_at": record.finished_at,
+                    **safe,
+                }
+            return response
         return {
             "run_id": run_id,
             "status": result.get("status"),

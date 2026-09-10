@@ -162,6 +162,7 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
             "harbor_status",
             "harbor_enabled_workers",
             "harbor_recent_runs",
+            "harbor_newsletter_intelligence",
             "harbor_run_worker",
         }
         assert "tenant_id" not in str(schemas)
@@ -205,6 +206,7 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
             "harbor_status",
             "harbor_enabled_workers",
             "harbor_recent_runs",
+            "harbor_newsletter_intelligence",
         ):
             assert tools[name]["annotations"] == {
                 "readOnlyHint": True,
@@ -218,38 +220,43 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
             "idempotentHint": True,
         }
         assert tools["harbor_dashboard"]["_meta"]["ui"] == {
-            "resourceUri": "ui://harbor/intelligence-summary-v2.html",
+            "resourceUri": "ui://harbor/intelligence-summary-v3.html",
             "visibility": ["model", "app"],
+        }
+        assert tools["harbor_newsletter_intelligence"]["_meta"]["ui"] == {
+            "visibility": ["model", "app"]
         }
 
         resources = _request(client, key_a, "resources/list").json()["result"][
             "resources"
         ]
-        assert resources[0]["uri"] == "ui://harbor/intelligence-summary-v2.html"
+        assert resources[0]["uri"] == "ui://harbor/intelligence-summary-v3.html"
         assert resources[0]["mimeType"] == "text/html;profile=mcp-app"
         resource = _request(
             client,
             key_a,
             "resources/read",
-            {"uri": "ui://harbor/intelligence-summary-v2.html"},
+            {"uri": "ui://harbor/intelligence-summary-v3.html"},
         ).json()["result"]["contents"][0]
         assert resource["mimeType"] == "text/html;profile=mcp-app"
         assert 'request("ui/initialize"' in resource["text"]
         assert 'notify("ui/notifications/initialized"' in resource["text"]
-        assert 'protocolVersion: "2026-01-26"' in resource["text"]
+        assert 'protocolVersion:"2026-01-26"' in resource["text"]
         assert "ui/notifications/tool-result" in resource["text"]
-        assert "Intelligence report:" in resource["text"]
+        assert "Intelligence —" in resource["text"]
         assert "What changed" in resource["text"]
-        assert "Why it matters" in resource["text"]
-        assert "Top action" in resource["text"]
-        assert "grid-template-columns: repeat(3, 1fr)" in resource["text"]
-        assert "padding: 22px 32px" in resource["text"]
+        assert "Top content" in resource["text"]
+        assert "Opportunities" in resource["text"]
+        assert "Recent runs" in resource["text"]
+        assert "grid-template-columns:repeat(3,1fr)" in resource["text"]
+        assert "padding:22px 28px" in resource["text"]
         assert "<h1" not in resource["text"]
-        assert "Connected" not in resource["text"]
-        assert "Detailed recommendations" not in resource["text"]
-        assert "<select" not in resource["text"]
+        assert "background:var(--paper)" in resource["text"]
+        assert "#111" in resource["text"]
+        assert "#008" not in resource["text"]
+        assert 'createElement("select")' in resource["text"]
         assert "class=\"tabs\"" not in resource["text"]
-        assert "overflow-y" not in resource["text"]
+        assert 'request("tools/call"' in resource["text"]
 
         status_a = _request(
             client,
@@ -273,6 +280,10 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
             "arguments": {
                 "worker_id": "newsletter-intelligence",
                 "idempotency_key": "mcp-window",
+                "timeframe": "last_7_days",
+                "view": "portfolio",
+                "provider": "beehiiv",
+                "publication_ids": ["pub_one", "pub_two"],
             },
         }
         first = _request(client, key_a, "tools/call", run_params).json()["result"]
@@ -281,7 +292,23 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
         assert first["structuredContent"]["status"] == "completed"
         assert second["structuredContent"]["duplicate_suppressed"] is True
         assert len(Runner.calls) == 1
+        assert Runner.calls[0][1]["input"] == {
+            "timeframe": "last_7_days",
+            "view": "portfolio",
+            "provider": "beehiiv",
+            "publication_ids": ["pub_one", "pub_two"],
+            "recent_posts": 100,
+        }
         assert "private-report.md" not in str(first) + str(second)
+
+        intelligence = _request(
+            client,
+            key_a,
+            "tools/call",
+            {"name": "harbor_newsletter_intelligence", "arguments": {}},
+        ).json()["result"]["structuredContent"]
+        assert intelligence["found"] is True
+        assert intelligence["latest_intelligence"]["metrics"]["active_subscribers"] == 1200
 
         dashboard = _request(
             client,
