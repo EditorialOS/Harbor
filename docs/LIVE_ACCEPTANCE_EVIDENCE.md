@@ -48,9 +48,9 @@ identifiers, recipient addresses, or customer report content.
 
 ## v1 release-candidate deployment
 
-- Deployed package version: `1.0.0rc1`
-- Fly app and scheduler Machine version: 21
-- Fly image: `deployment-01M22M6JA550FS61CKRMH6TGT3`
+- Deployed package version: `1.0.0rc2`
+- Fly app and scheduler Machine version: 22
+- Fly image: `deployment-01M247MKCF1DS38J6ZB3CVFZTB`
 - Database schema version: 12
 - `/healthz`, `/readyz`, `/status`, `/metrics`, `/privacy`, `/terms`,
   `/support`, and `/signup`: passed
@@ -70,6 +70,10 @@ identifiers, recipient addresses, or customer report content.
 - Repeating the release-check idempotency key: duplicate suppressed
 - Local complete suite with disposable PostgreSQL 16: 104 passed
 - Local and Fly remote production image builds: passed
+- ChatGPT selected and mounted the `harbor_dashboard` MCP Apps resource: passed
+- The first live dashboard render exposed a missing MCP Apps initialization
+  handshake; the standards-compliant handshake is deployed in rc.2 and awaits
+  a refreshed live ChatGPT render check.
 
 ## Second-tenant isolation
 
