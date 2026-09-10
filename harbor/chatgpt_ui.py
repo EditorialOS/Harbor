@@ -1,6 +1,6 @@
 """Portable MCP Apps UI for Harbor's authenticated intelligence summary."""
 
-HARBOR_APP_URI = "ui://harbor/intelligence-summary-v1.html"
+HARBOR_APP_URI = "ui://harbor/intelligence-summary-v2.html"
 
 HARBOR_APP_HTML = r"""<!doctype html>
 <html lang="en">
@@ -23,57 +23,50 @@ HARBOR_APP_HTML = r"""<!doctype html>
       color: var(--ink);
       font: 14px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
-    .shell { padding: 18px 20px 16px; }
+    .shell { padding: 0 !important; }
     .masthead {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      padding-bottom: 14px;
+      padding: 22px 32px;
       border-bottom: 1px solid var(--line);
     }
-    .product { font-size: 14px; font-weight: 650; }
-    .connection { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
-    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink); }
-    .dot.off { background: var(--faint); }
-    .workspace { padding: 18px 0 14px; }
-    .workspace-name { font-size: 13px; font-weight: 600; }
-    .meta { color: var(--muted); font-size: 12px; }
-    .label {
-      margin-bottom: 7px;
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 650;
-      letter-spacing: .06em;
-      text-transform: uppercase;
+    .product { font-size: 15px; font-weight: 650; }
+    .report { padding: 28px 32px 30px; }
+    .report-date {
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 400;
     }
-    h1 { margin: 0; font-size: 24px; line-height: 1.24; letter-spacing: -.02em; font-weight: 650; }
     .metrics {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
-      margin: 18px 0 0;
-      padding: 15px 0;
+      padding: 22px 32px;
       border-top: 1px solid var(--line);
       border-bottom: 1px solid var(--line);
     }
-    .metric { min-width: 0; padding: 0 16px; }
+    .metric { min-width: 0; padding: 0 24px; }
     .metric:first-child { padding-left: 0; }
+    .metric:last-child { padding-right: 0; }
     .metric + .metric { border-left: 1px solid var(--line); }
-    .metric-label { color: var(--muted); font-size: 11px; }
+    .metric-label { color: var(--muted); font-size: 13px; }
     .metric-value { margin-top: 3px; font-size: 20px; line-height: 1.2; font-weight: 650; }
-    .insight { padding: 14px 0; border-bottom: 1px solid var(--line); }
-    .insight:last-of-type { border-bottom: 0; padding-bottom: 3px; }
-    .insight-title { margin-bottom: 4px; font-size: 12px; font-weight: 650; }
-    .insight-copy { color: #303030; }
-    .empty { padding: 32px 0; color: var(--muted); text-align: center; }
-    .error { padding: 14px 0; color: var(--ink); }
-    .footer { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--faint); font-size: 11px; }
+    .insights { display: grid; grid-template-columns: repeat(3, 1fr); padding: 24px 32px 28px; }
+    .insight { min-width: 0; padding: 0 24px; }
+    .insight:first-child { padding-left: 0; }
+    .insight:last-child { padding-right: 0; }
+    .insight + .insight { border-left: 1px solid var(--line); }
+    .insight-title { margin-bottom: 5px; font-size: 14px; font-weight: 400; }
+    .insight-copy { color: var(--muted); font-size: 14px; font-weight: 400; }
+    .empty { padding: 36px 32px; color: var(--muted); text-align: center; }
+    .error { padding: 24px 32px; color: var(--ink); }
     @media (max-width: 520px) {
-      .shell { padding: 15px 16px 13px; }
-      h1 { font-size: 21px; }
-      .metric { padding: 0 10px; }
-      .metric-label { font-size: 10px; }
+      .masthead { padding: 18px 22px; }
+      .report { padding: 22px; }
+      .metrics { padding: 18px 22px; }
+      .metric { padding: 0 12px; }
+      .metric-label { font-size: 11px; }
       .metric-value { font-size: 18px; }
+      .insights { padding: 20px 22px 24px; }
+      .insight { padding: 0 12px; }
+      .insight-title, .insight-copy { font-size: 12px; }
     }
   </style>
 </head>
@@ -109,12 +102,19 @@ HARBOR_APP_HTML = r"""<!doctype html>
       return new Intl.NumberFormat(document.documentElement.lang || "en-US").format(value);
     }
 
-    function formatDate(value) {
+    function formatReportDate(value, timeZone) {
       if (!value) return "Not yet";
       const date = new Date(value);
-      return Number.isNaN(date.valueOf()) ? String(value) : new Intl.DateTimeFormat(
-        document.documentElement.lang || "en-US", { dateStyle: "medium", timeStyle: "short" }
-      ).format(date);
+      if (Number.isNaN(date.valueOf())) return String(value);
+      try {
+        const parts = new Intl.DateTimeFormat(document.documentElement.lang || "en-US", {
+          month: "numeric", day: "2-digit", year: "2-digit", timeZone: timeZone || "UTC"
+        }).formatToParts(date);
+        const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+        return `${values.month}.${values.day}.${values.year}`;
+      } catch (error) {
+        return `${date.getUTCMonth() + 1}.${String(date.getUTCDate()).padStart(2, "0")}.${String(date.getUTCFullYear()).slice(-2)}`;
+      }
     }
 
     function metric(label, value) {
@@ -132,13 +132,8 @@ HARBOR_APP_HTML = r"""<!doctype html>
     function render(data) {
       root.replaceChildren();
 
-      const connected = data.connection_status === "ready";
       const header = el("header", "masthead");
       header.append(el("div", "product", "Harbor"));
-      const connection = el("div", "connection");
-      connection.append(el("span", `dot ${connected ? "" : "off"}`.trim()));
-      connection.append(el("span", "", connected ? "Connected" : "Needs attention"));
-      header.append(connection);
       root.append(header);
 
       const latest = data.latest_intelligence;
@@ -151,13 +146,9 @@ HARBOR_APP_HTML = r"""<!doctype html>
       const metrics = latest.metrics || {};
       const latestPost = metrics.latest_post || {};
 
-      const workspace = el("section", "workspace");
-      workspace.append(el("div", "workspace-name", data.workspace?.name || "Harbor workspace"));
-      workspace.append(el("div", "meta", `${formatDate(latest.finished_at)} · ${data.workspace?.timezone || "UTC"}`));
-      root.append(workspace);
-
-      root.append(el("div", "label", "Latest intelligence"));
-      root.append(el("h1", "", intel.headline || latest.summary || "Latest report ready"));
+      const report = el("section", "report");
+      report.append(el("div", "report-date", `Intelligence report: ${formatReportDate(latest.finished_at, data.workspace?.timezone)}`));
+      root.append(report);
 
       const metricsRow = el("section", "metrics");
       metricsRow.append(
@@ -167,13 +158,13 @@ HARBOR_APP_HTML = r"""<!doctype html>
       );
       root.append(metricsRow);
 
-      root.append(
+      const insights = el("section", "insights");
+      insights.append(
         insight("What changed", first(intel.what_changed, "A prior report is needed to measure change.")),
         insight("Why it matters", first(intel.why_it_matters, "Harbor needs more source data before drawing a reliable conclusion.")),
         insight("Top action", first(intel.recommendations, "No immediate action is recommended."))
       );
-
-      root.append(el("div", "footer", "Detailed recommendations and supporting analysis continue below in the conversation."));
+      root.append(insights);
     }
 
     function request(method, params) {
@@ -189,7 +180,7 @@ HARBOR_APP_HTML = r"""<!doctype html>
     async function connect() {
       try {
         await request("ui/initialize", {
-          appInfo: { name: "Harbor", version: "1.0.0-rc.3" },
+          appInfo: { name: "Harbor", version: "1.0.0-rc.4" },
           appCapabilities: {},
           protocolVersion: "2026-01-26"
         });
