@@ -11,4 +11,6 @@ Harbor 1.0.0-rc.4 establishes the compact visual pattern for Harbor's ChatGPT su
 - Placed the three key metrics and three primary insights into aligned three-column rows.
 - Matched insight labels to the body copy's size and weight, with supporting copy in gray.
 
-This remains a release candidate pending visual confirmation of the live ChatGPT card.
+The compact card has been deployed and visually confirmed in ChatGPT. This
+remains a release candidate while the external launch gates in
+`docs/LAUNCH_CHECKLIST.md` are completed.
