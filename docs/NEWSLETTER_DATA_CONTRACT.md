@@ -66,3 +66,12 @@ audience is only calculated when every selected publication returned an
 available subscriber count; engagement is recipient-weighted across comparable
 issues. Provider failures fail the portfolio run visibly rather than silently
 returning a partial portfolio.
+
+## Independent reports
+
+Tenant database configuration may contain multiple `report_schedules`. Each has
+its own stable ID, recurrence, Newsletter Intelligence selection/timeframe, and
+optional email recipients. Supported recurrences are daily, weekly, monthly,
+quarterly, first weekday of a month/quarter, and a custom set of weekdays.
+Scheduler state and idempotency keys are isolated by report ID. The original
+one-schedule-per-worker configuration remains supported for existing tenants.

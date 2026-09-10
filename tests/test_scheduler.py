@@ -7,6 +7,9 @@ from harbor.scheduler import (
     Scheduler,
     monitored_tick,
     next_occurrence,
+    next_report_occurrence,
+    parse_report_schedule,
+    report_window_key,
     window_key,
 )
 from harbor.tenant_store import TenantStore
@@ -171,3 +174,123 @@ def test_monitored_tick_records_healthy_and_failed_heartbeats(tmp_path):
     assert heartbeat is not None
     assert heartbeat.status == "failed"
     assert heartbeat.metadata == {"error_type": "RuntimeError"}
+
+
+def test_report_recurrences_support_weekly_monthly_quarterly_and_custom():
+    now = dt.datetime(2026, 9, 6, 12, 0, tzinfo=dt.timezone.utc)  # Sunday
+    weekly = parse_report_schedule(
+        {"frequency": "weekly", "weekday": "Monday", "hour": 6, "minute": 15}
+    )
+    monthly = parse_report_schedule(
+        {"frequency": "monthly", "first_weekday": True, "hour": 7}
+    )
+    quarterly = parse_report_schedule(
+        {"frequency": "quarterly", "day": 2, "hour": 8}
+    )
+    custom = parse_report_schedule(
+        {"frequency": "custom", "weekdays": ["Tuesday", "Thursday"], "hour": 9}
+    )
+
+    assert next_report_occurrence(now, "UTC", weekly) == dt.datetime(
+        2026, 9, 7, 6, 15, tzinfo=dt.timezone.utc
+    )
+    assert next_report_occurrence(now, "UTC", monthly) == dt.datetime(
+        2026, 10, 1, 7, 0, tzinfo=dt.timezone.utc
+    )
+    assert next_report_occurrence(now, "UTC", quarterly) == dt.datetime(
+        2026, 10, 2, 8, 0, tzinfo=dt.timezone.utc
+    )
+    assert next_report_occurrence(now, "UTC", custom) == dt.datetime(
+        2026, 9, 8, 9, 0, tzinfo=dt.timezone.utc
+    )
+    assert report_window_key(
+        dt.datetime(2026, 9, 7, 6, 15, tzinfo=dt.timezone.utc),
+        "UTC",
+        "weekly-review",
+        weekly,
+    ) == "report-schedule-v1:weekly-review:2026-09-07:0615:UTC"
+
+
+def test_multiple_reports_keep_independent_timeframes_state_and_recipients(tmp_path):
+    store = TenantStore(f"sqlite:///{tmp_path / 'reports.db'}")
+    store.create_tenant(
+        "reports",
+        "Reports",
+        "UTC",
+        {
+            "workers": ["newsletter-intelligence"],
+            "connections": [],
+            "outputs": ["files"],
+            "report_schedules": [
+                {
+                    "id": "daily-pulse",
+                    "worker_id": "newsletter-intelligence",
+                    "schedule": {"frequency": "daily", "hour": 6},
+                    "input": {"timeframe": "yesterday", "view": "portfolio"},
+                    "output_settings": {
+                        "email": {
+                            "recipients": ["daily@example.com"],
+                            "subject_prefix": "Daily Pulse",
+                        }
+                    },
+                },
+                {
+                    "id": "weekly-review",
+                    "worker_id": "newsletter-intelligence",
+                    "schedule": {
+                        "frequency": "weekly",
+                        "weekday": "Monday",
+                        "hour": 6,
+                    },
+                    "input": {"timeframe": "last_7_days", "view": "portfolio"},
+                    "output_settings": {
+                        "email": {
+                            "recipients": ["weekly@example.com"],
+                            "subject_prefix": "Weekly Review",
+                        }
+                    },
+                },
+            ],
+        },
+    )
+    store.set_sprite("reports", "harbor-reports")
+    runner = SuccessfulRunner()
+    deliveries = []
+
+    def deliver(tenant, run_id, result):
+        deliveries.append(tenant.config["output_settings"]["email"])
+        return []
+
+    scheduler = Scheduler(
+        store, runner, sleeper=lambda _: None, delivery_handler=deliver
+    )
+    now = dt.datetime(2026, 9, 6, 5, 0, tzinfo=dt.timezone.utc)
+    initialized = scheduler.tick(now)
+    assert {event["schedule_id"] for event in initialized} == {
+        "daily-pulse",
+        "weekly-review",
+    }
+    due = "2026-09-07T06:00:00+00:00"
+    for state_id in ("report:daily-pulse", "report:weekly-review"):
+        store.upsert_schedule_state(
+            "reports", state_id, next_run_at=due, last_status="scheduled"
+        )
+
+    completed = scheduler.tick(
+        dt.datetime(2026, 9, 7, 6, 1, tzinfo=dt.timezone.utc)
+    )
+
+    assert {event["schedule_id"] for event in completed} == {
+        "daily-pulse",
+        "weekly-review",
+    }
+    assert [call[1]["input"]["timeframe"] for call in runner.calls] == [
+        "yesterday",
+        "last_7_days",
+    ]
+    assert [settings["recipients"][0] for settings in deliveries] == [
+        "daily@example.com",
+        "weekly@example.com",
+    ]
+    assert store.get_schedule_state("reports", "report:daily-pulse") is not None
+    assert store.get_schedule_state("reports", "report:weekly-review") is not None

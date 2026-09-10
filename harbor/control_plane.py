@@ -29,7 +29,13 @@ from .billing import billing_is_active
 from .dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
 from .outputs import DeliveryCoordinator, DeliveryError, validate_email_recipient
 from .remote_mcp import create_remote_mcp
-from .scheduler import DailySchedule, next_occurrence, parse_daily_schedule
+from .scheduler import (
+    DailySchedule,
+    next_occurrence,
+    next_report_occurrence,
+    parse_daily_schedule,
+    parse_report_schedule,
+)
 from .sprite_runner import SpriteRunner
 from .tenant_store import (
     LATEST_SCHEMA_VERSION,
@@ -37,6 +43,7 @@ from .tenant_store import (
     TenantStoreError,
     validate_non_secret_metadata,
 )
+from .time_ranges import resolve_date_window
 from .web_portal import create_web_router
 
 store = TenantStore()
@@ -123,6 +130,26 @@ class ScheduleUpdate(BaseModel):
     hour: int = Field(ge=0, le=23)
     minute: int = Field(default=0, ge=0, le=59)
     timezone: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ReportScheduleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1, max_length=100)
+    enabled: bool = True
+    schedule: dict[str, Any]
+    timeframe: str
+    view: str = Field(default="portfolio", pattern=r"^(publication|portfolio)$")
+    provider: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9._-]*$"
+    )
+    connection_ids: list[str] = Field(default_factory=list, max_length=50)
+    publication_ids: list[str] = Field(default_factory=list, max_length=50)
+    start_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    end_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    issue_limit: int = Field(default=100, ge=1, le=1000)
+    email_recipients: list[str] = Field(default_factory=list, max_length=50)
+    email_subject: str = Field(default="Harbor Intelligence", max_length=100)
 
 
 class EmailOutputUpdate(BaseModel):
@@ -412,6 +439,13 @@ def tenant_status(tenant_id: str, authorization: str | None = Header(default=Non
         worker_id: store.get_schedule_state(tenant_id, worker_id)
         for worker_id in record.config.get("schedule", {})
     }
+    report_schedule_state = {
+        str(item.get("id")): store.get_schedule_state(
+            tenant_id, f"report:{item.get('id')}"
+        )
+        for item in record.config.get("report_schedules", [])
+        if item.get("id")
+    }
     return {
         "tenant_id": record.tenant_id,
         "name": record.name,
@@ -431,6 +465,36 @@ def tenant_status(tenant_id: str, authorization: str | None = Header(default=Non
             for worker_id, state in schedule_state.items()
             if state is not None
         },
+        "report_schedules": [
+            {
+                "id": item.get("id"),
+                "label": item.get("label"),
+                "enabled": item.get("enabled", True),
+                "schedule": item.get("schedule"),
+                "timeframe": (item.get("input") or {}).get("timeframe"),
+                "view": (item.get("input") or {}).get("view"),
+                "source_count": len((item.get("input") or {}).get("connection_ids", [])),
+                "publication_count": len(
+                    (item.get("input") or {}).get("publication_ids", [])
+                ),
+                "recipient_count": len(
+                    ((item.get("output_settings") or {}).get("email") or {}).get(
+                        "recipients", []
+                    )
+                ),
+                "next_run_at": (
+                    report_schedule_state[str(item.get("id"))].next_run_at
+                    if report_schedule_state.get(str(item.get("id"))) is not None
+                    else None
+                ),
+                "last_status": (
+                    report_schedule_state[str(item.get("id"))].last_status
+                    if report_schedule_state.get(str(item.get("id"))) is not None
+                    else "not_scheduled"
+                ),
+            }
+            for item in record.config.get("report_schedules", [])
+        ],
         "outputs": record.config.get("outputs", ["files"]),
         "email_output": {
             "configured": bool(
@@ -487,6 +551,101 @@ def update_worker_schedule(
         "timezone": timezone,
         "schedule": {"hour": req.hour, "minute": req.minute},
         "next_run_at": next_at.isoformat(),
+    }
+
+
+@app.put("/v1/tenants/{tenant_id}/report-schedules/{schedule_id}")
+def update_report_schedule(
+    tenant_id: str,
+    schedule_id: str,
+    req: ReportScheduleUpdate,
+    authorization: str | None = Header(default=None),
+):
+    """Create or replace one independently scheduled Newsletter Intelligence report."""
+    _tenant_auth(tenant_id, authorization)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", schedule_id):
+        raise HTTPException(status_code=422, detail="report schedule id is invalid")
+    try:
+        record = store.get(tenant_id)
+        schedule = parse_report_schedule(req.schedule)
+        window = resolve_date_window(
+            req.timeframe,
+            timezone=record.timezone,
+            start_date=req.start_date,
+            end_date=req.end_date,
+        )
+        recipients = [
+            validate_email_recipient(item) for item in req.email_recipients
+        ]
+        if "\r" in req.email_subject or "\n" in req.email_subject:
+            raise DeliveryError("email subject is invalid")
+        if req.view == "publication" and len(req.publication_ids) != 1:
+            raise ValueError(
+                "publication reports require exactly one selected publication"
+            )
+        report = {
+            "id": schedule_id,
+            "label": req.label,
+            "enabled": req.enabled,
+            "worker_id": "newsletter-intelligence",
+            "schedule": req.schedule,
+            "input": {
+                "timeframe": window.label,
+                "view": req.view,
+                "recent_posts": req.issue_limit,
+                **({"provider": req.provider} if req.provider else {}),
+                **(
+                    {"connection_ids": req.connection_ids}
+                    if req.connection_ids
+                    else {}
+                ),
+                **(
+                    {"publication_ids": req.publication_ids}
+                    if req.publication_ids
+                    else {}
+                ),
+                **({"start_date": req.start_date} if req.start_date else {}),
+                **({"end_date": req.end_date} if req.end_date else {}),
+            },
+            "output_settings": (
+                {
+                    "email": {
+                        "recipients": recipients,
+                        "subject_prefix": req.email_subject,
+                    }
+                }
+                if recipients
+                else {}
+            ),
+        }
+        validate_non_secret_metadata(report, "report_schedule")
+        config = dict(record.config)
+        reports = [
+            item
+            for item in config.get("report_schedules", [])
+            if item.get("id") != schedule_id
+        ]
+        reports.append(report)
+        config["report_schedules"] = reports
+        store.update_config(tenant_id, config, actor_type="tenant_api")
+        next_at = next_report_occurrence(
+            dt.datetime.now(dt.timezone.utc), record.timezone, schedule
+        )
+        store.upsert_schedule_state(
+            tenant_id,
+            f"report:{schedule_id}",
+            next_run_at=next_at.isoformat(),
+            last_status="scheduled" if req.enabled else "disabled",
+        )
+    except (DeliveryError, TenantStoreError, TypeError, ValueError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {
+        "tenant_id": tenant_id,
+        "schedule_id": schedule_id,
+        "enabled": req.enabled,
+        "timeframe": window.label,
+        "next_run_at": next_at.isoformat() if req.enabled else None,
+        "recipient_count": len(recipients),
     }
 
 

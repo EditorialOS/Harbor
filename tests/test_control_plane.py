@@ -240,6 +240,59 @@ def test_schedule_change_preserves_latest_scheduled_run_history(tmp_path, monkey
     assert state.attempt_count == 1
 
 
+def test_tenant_can_create_independent_report_schedule(tmp_path, monkeypatch):
+    store, key = _tenant_store(tmp_path)
+    monkeypatch.setattr(control_plane, "store", store)
+
+    result = control_plane.update_report_schedule(
+        "acme",
+        "weekly-review",
+        control_plane.ReportScheduleUpdate(
+            label="Weekly Review",
+            schedule={
+                "frequency": "weekly",
+                "weekday": "Monday",
+                "hour": 7,
+            },
+            timeframe="last_7_days",
+            view="portfolio",
+            publication_ids=["pub_one", "pub_two"],
+            email_recipients=["owner@example.com"],
+            email_subject="Weekly Intelligence",
+        ),
+        authorization=f"Bearer {key}",
+    )
+
+    assert result["schedule_id"] == "weekly-review"
+    assert result["timeframe"] == "last_7_days"
+    assert result["recipient_count"] == 1
+    saved = store.get("acme").config["report_schedules"][0]
+    assert saved["input"]["publication_ids"] == ["pub_one", "pub_two"]
+    assert saved["output_settings"]["email"]["recipients"] == [
+        "owner@example.com"
+    ]
+    state = store.get_schedule_state("acme", "report:weekly-review")
+    assert state is not None
+    status = control_plane.tenant_status("acme", authorization=f"Bearer {key}")
+    assert status["report_schedules"][0]["recipient_count"] == 1
+    assert "owner@example.com" not in str(status)
+
+    with pytest.raises(HTTPException) as error:
+        control_plane.update_report_schedule(
+            "acme",
+            "bad-custom",
+            control_plane.ReportScheduleUpdate(
+                label="Bad",
+                schedule={"frequency": "daily", "hour": 6},
+                timeframe="custom",
+                view="publication",
+                publication_ids=["pub_one"],
+            ),
+            authorization=f"Bearer {key}",
+        )
+    assert error.value.status_code == 422
+
+
 def test_tenant_creation_rejects_invalid_schedule_before_persisting(
     tmp_path, monkeypatch
 ):
