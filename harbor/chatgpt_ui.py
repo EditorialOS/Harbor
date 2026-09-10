@@ -30,11 +30,17 @@ HARBOR_APP_HTML = r"""<!doctype html>
     }
     .product { font-size: 15px; font-weight: 650; }
     .report { padding: 28px 32px 30px; }
-    .report-date {
-      color: var(--ink);
-      font-size: 14px;
+    .report-heading {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .28em;
+      font-size: 24px;
+      line-height: 1.25;
       font-weight: 400;
+      letter-spacing: -.015em;
     }
+    .report-name { color: var(--ink); }
+    .report-date { color: var(--muted); }
     .metrics {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -60,6 +66,7 @@ HARBOR_APP_HTML = r"""<!doctype html>
     @media (max-width: 520px) {
       .masthead { padding: 18px 22px; }
       .report { padding: 22px; }
+      .report-heading { font-size: 21px; }
       .metrics { padding: 18px 22px; }
       .metric { padding: 0 12px; }
       .metric-label { font-size: 11px; }
@@ -147,7 +154,12 @@ HARBOR_APP_HTML = r"""<!doctype html>
       const latestPost = metrics.latest_post || {};
 
       const report = el("section", "report");
-      report.append(el("div", "report-date", `Intelligence report: ${formatReportDate(latest.finished_at, data.workspace?.timezone)}`));
+      const reportHeading = el("div", "report-heading");
+      reportHeading.append(
+        el("span", "report-name", "Intelligence report:"),
+        el("span", "report-date", formatReportDate(latest.finished_at, data.workspace?.timezone))
+      );
+      report.append(reportHeading);
       root.append(report);
 
       const metricsRow = el("section", "metrics");
