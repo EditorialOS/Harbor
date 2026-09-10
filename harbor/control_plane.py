@@ -17,7 +17,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 try:
-    from fastapi import Depends, FastAPI, Header, HTTPException
+    from fastapi import Depends, FastAPI, Header, HTTPException, Request
     from fastapi.responses import PlainTextResponse
     from pydantic import BaseModel, ConfigDict, Field
 except ImportError as e:  # pragma: no cover
@@ -26,6 +26,8 @@ except ImportError as e:  # pragma: no cover
     ) from e
 
 from .billing import billing_is_active
+from .broker_auth import BrokerAuthError, verify_broker_grant
+from .composio_client import ComposioClient, ComposioError, kit_operations
 from .dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
 from .outputs import DeliveryCoordinator, DeliveryError, validate_email_recipient
 from .remote_mcp import create_remote_mcp
@@ -428,6 +430,57 @@ def attach_connection(tenant_id: str, req: ConnectionAttach):
             "name": result.get("publication_name"),
         },
     }
+
+
+@app.get(
+    "/internal/providers/kit/{connection_id}/{operation}",
+    include_in_schema=False,
+)
+def kit_provider_broker(
+    connection_id: str,
+    operation: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Execute one allowlisted Kit read for one signed tenant run."""
+    if operation not in kit_operations():
+        raise HTTPException(status_code=404, detail="provider operation not found")
+    candidate = (authorization or "").removeprefix("Bearer ")
+    try:
+        grant = verify_broker_grant(
+            candidate,
+            expected_connection_id=connection_id,
+            expected_provider="kit",
+        )
+        if not store.run_is_active(grant.tenant_id, grant.run_id):
+            raise BrokerAuthError("run is not active")
+        record = store.get(grant.tenant_id)
+        connection = next(
+            item
+            for item in record.config.get("connections", [])
+            if item.get("id") == connection_id and item.get("provider") == "kit"
+        )
+        settings = connection.get("settings") or {}
+        vendor_connection_id = settings.get("connected_account_id")
+        if (
+            connection.get("status") != "verified"
+            or settings.get("transport") != "composio"
+            or not isinstance(vendor_connection_id, str)
+        ):
+            raise BrokerAuthError("connection is not authorized for this tenant")
+        return ComposioClient().proxy_kit_get(
+            vendor_connection_id,
+            operation,
+            dict(request.query_params),
+        )
+    except (BrokerAuthError, StopIteration, TenantStoreError) as error:
+        raise HTTPException(status_code=401, detail="provider authorization denied") from error
+    except ComposioError as error:
+        status = 503 if error.kind in {"not_configured", "privacy_not_confirmed"} else 502
+        raise HTTPException(
+            status_code=status,
+            detail={"kind": error.kind, "detail": error.detail},
+        ) from error
 
 
 @app.get("/v1/tenants/{tenant_id}/status")

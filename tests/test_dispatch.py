@@ -1,6 +1,12 @@
 import pytest
 
-from harbor.dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
+from harbor.broker_auth import verify_broker_grant
+from harbor.dispatch import (
+    DuplicateRun,
+    RunExecutionFailed,
+    build_run_spec,
+    dispatch_worker,
+)
 from harbor.sprites_client import SpriteError
 from harbor.tenant_store import TenantStore
 
@@ -206,3 +212,51 @@ def test_dispatch_does_not_recover_an_unexpired_run(tmp_path):
 
     assert error.value.record is not None
     assert error.value.record.run_id == "run_active"
+
+
+def test_composio_connection_gets_only_a_transient_tenant_scoped_broker_grant(
+    tmp_path, monkeypatch
+):
+    store, _ = _store_and_tenant(tmp_path)
+    connection = {
+        "id": "ca_kit_one",
+        "provider": "kit",
+        "status": "verified",
+        "settings": {
+            "transport": "composio",
+            "auth_mode": "composio_broker",
+            "connected_account_id": "ca_kit_one",
+            "publication_id": "29",
+        },
+    }
+    store.upsert_connection("acme", connection)
+    tenant = store.get("acme")
+    monkeypatch.setenv("HARBOR_PUBLIC_URL", "https://harbor.example")
+    monkeypatch.setenv(
+        "HARBOR_BROKER_SIGNING_KEY",
+        "test-broker-signing-key-with-more-than-32-bytes",
+    )
+
+    spec = build_run_spec(
+        tenant,
+        "newsletter-intelligence",
+        {},
+        "run_composio",
+        "window-one",
+    )
+
+    runtime = spec["connections"][0]["settings"]
+    assert runtime["auth_mode"] == "harbor_broker"
+    assert runtime["broker_base_url"] == (
+        "https://harbor.example/internal/providers/kit/ca_kit_one"
+    )
+    grant = verify_broker_grant(
+        runtime["broker_authorization"],
+        expected_connection_id="ca_kit_one",
+        expected_provider="kit",
+        signing_key="test-broker-signing-key-with-more-than-32-bytes",
+    )
+    assert grant.tenant_id == "acme"
+    persisted = store.get("acme").config["connections"][0]["settings"]
+    assert "broker_authorization" not in persisted
+    assert "broker_base_url" not in persisted

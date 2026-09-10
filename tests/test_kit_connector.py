@@ -170,6 +170,37 @@ def test_kit_client_uses_documented_api_key_header_only_in_explicit_mode(monkeyp
     assert captured[0].get_header("Authorization") is None
 
 
+def test_kit_client_routes_broker_mode_to_fixed_operation(monkeypatch):
+    captured = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self):
+            return b'{"account":{"id":1,"name":"Test","timezone":{}}}'
+
+    def urlopen(request, timeout):
+        captured.append(request)
+        return Response()
+
+    monkeypatch.setattr(kit_client.urllib.request, "urlopen", urlopen)
+    kit_client.current_account(
+        credential="short-lived-harbor-grant",
+        base_url="https://harbor.example/internal/providers/kit/ca_one",
+        auth_mode="harbor_broker",
+    )
+
+    assert captured[0].full_url.endswith("/ca_one/account")
+    assert captured[0].get_header("Authorization") == (
+        "Bearer short-lived-harbor-grant"
+    )
+    assert captured[0].get_header("X-kit-api-key") is None
+
+
 def test_same_worker_runs_kit_without_provider_specific_intelligence(
     tmp_path, monkeypatch
 ):

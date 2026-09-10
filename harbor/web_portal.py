@@ -29,6 +29,11 @@ from .billing import (
     billing_is_active,
     billing_required,
 )
+from .composio_client import (
+    ComposioClient,
+    ComposioError,
+    stable_harbor_connection_id,
+)
 from .dispatch import DuplicateRun, RunExecutionFailed, dispatch_worker
 from .outputs import (
     DeliveryCoordinator,
@@ -221,6 +226,28 @@ def _connection_form(
 <button type="submit"{disabled}>Connect beehiiv</button></form>"""
 
 
+def _kit_connection_form(
+    connection: dict[str, Any] | None,
+    csrf_token: str,
+    *,
+    billing_gate: bool,
+) -> str:
+    if connection and connection.get("status") == "verified":
+        name = (connection.get("settings") or {}).get("publication_name")
+        return (
+            '<p class="status ok">Connected and verified</p>'
+            + (f"<p>{_escape(name)}</p>" if name else "")
+            + '<p class="muted small">Kit manages consent. Composio stores and refreshes the OAuth credential; Harbor and your private worker never receive it.</p>'
+        )
+    composio = ComposioClient()
+    if not composio.configured_for_kit():
+        return '<p class="muted">Kit connections are not enabled in this Harbor environment yet.</p>'
+    disabled = " disabled" if billing_gate else ""
+    return f"""<p>Connect Kit with its secure sign-in screen. You will never paste an API key into Harbor.</p>
+<form method="post" action="/app/connections/kit"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
+<button type="submit"{disabled}>Connect Kit</button></form>"""
+
+
 def _provision(store: TenantStore, runner: Any, tenant_id: str) -> bool:
     record = store.get(tenant_id)
     sprite_name = (
@@ -256,6 +283,8 @@ def _notice(value: str | None) -> str:
         "connection_ready": "Your beehiiv connection was verified.",
         "connection_select": "Your beehiiv account is connected. Choose the newsletter Harbor should analyze.",
         "connection_failed": "Harbor could not verify that beehiiv connection. Your credential was not saved by Harbor; check that the key is active and try again.",
+        "kit_ready": "Your Kit connection was verified.",
+        "kit_failed": "Harbor could not verify the Kit connection. No provider credential was exposed to Harbor; please try again.",
         "run_completed": "Newsletter Intelligence completed successfully.",
         "run_failed": "The run failed and Harbor recorded the failure. You can safely try again.",
         "sprite_ready": "Your private Harbor computer is ready.",
@@ -343,9 +372,9 @@ def create_web_router(
             "Privacy",
             """<h1>Privacy notice</h1><p class="lede">How Harbor handles information while delivering Newsletter Intelligence.</p>
 <section class="card"><h2>Information Harbor processes</h2><p>Harbor stores your account email, workspace settings, schedule, delivery destination, non-secret connection metadata, run history, delivery status, and audit events. When a worker runs, Harbor processes the newsletter performance data needed to create your report.</p></section>
-<section class="card"><h2>Credentials and tenant isolation</h2><p>Provider credentials are stored by Fly’s encrypted connector service. Harbor does not store the raw provider credential in its database, worker files, reports, or logs. Each workspace receives a separate persistent Sprite, and every operation is scoped to its workspace.</p></section>
-<section class="card"><h2>Service providers</h2><p>Harbor uses infrastructure and delivery providers to operate the service, including Fly.io for application and worker compute, a hosted Postgres provider for durable state, Auth0 for ChatGPT OAuth, and Resend for email delivery. Connected services such as beehiiv provide source data at your direction.</p></section>
-<section class="card"><h2>Your choices</h2><p>You can disconnect a source, disable email delivery, or request workspace deletion. This pre-launch notice must be reviewed and paired with a support contact before public commercial release.</p><p class="muted small">Last updated September 8, 2026.</p></section>""",
+<section class="card"><h2>Credentials and tenant isolation</h2><p>Provider credentials are stored by an encrypted connection service such as Fly Connectors or Composio. Harbor does not store the raw provider credential in its database, worker files, reports, or logs. Each workspace receives a separate persistent Sprite, and every operation is scoped to its workspace.</p></section>
+<section class="card"><h2>Service providers</h2><p>Harbor uses infrastructure and delivery providers to operate the service, including Fly.io for application and worker compute, a hosted Postgres provider for durable state, Auth0 for ChatGPT OAuth, Composio for selected provider authorization and credential transport, and Resend for email delivery. Connected services such as beehiiv and Kit provide source data at your direction.</p></section>
+<section class="card"><h2>Your choices</h2><p>You can disconnect a source, disable email delivery, or request workspace deletion. This pre-launch notice must be reviewed and paired with a support contact before public commercial release.</p><p class="muted small">Last updated September 10, 2026.</p></section>""",
         )
 
     @router.get("/terms", response_class=HTMLResponse)
@@ -676,10 +705,16 @@ def create_web_router(
         connection = next(
             (item for item in connections if item.get("provider") == "beehiiv"), None
         )
+        kit_connection = next(
+            (item for item in connections if item.get("provider") == "kit"), None
+        )
+        connected_count = sum(
+            item.get("status") == "verified" for item in connections
+        )
         connection_status = (
-            '<span class="status ok">Connected</span>'
-            if connection and connection.get("status") == "verified"
-            else '<span class="status warn">Not connected</span>'
+            f'<span class="status ok">{connected_count} source{"s" if connected_count != 1 else ""} connected</span>'
+            if connected_count
+            else '<span class="status warn">No source connected</span>'
         )
         publication_choices = (
             (connection.get("settings") or {}).get("publications", [])
@@ -724,12 +759,15 @@ def create_web_router(
         run_operation = "web_" + secrets.token_urlsafe(24)
         content = f"""<h1>{_escape(record.name)}</h1><p class="lede">Newsletter Intelligence workspace</p>{_notice(notice)}
 <div class="grid"><div class="card"><h2>Private worker computer</h2><p>{sprite_status}</p>{provisioning_action}</div>
-<div class="card"><h2>beehiiv source</h2><p>{connection_status}</p></div>
+<div class="card"><h2>Sources</h2><p>{connection_status}</p></div>
 <div class="card"><h2>Next report</h2><p class="status">{next_run}</p></div></div>
 {billing_card}
 
 <section class="card"><h2>Connect beehiiv</h2>
 {_connection_form(connection, publication_choices, csrf_token, bool(record.sprite_name) and not billing_gate)}</section>
+
+<section class="card"><h2>Connect Kit</h2>
+{_kit_connection_form(kit_connection, csrf_token, billing_gate=billing_gate)}</section>
 
 <div class="grid"><section class="card"><h2>Schedule</h2><form method="post" action="/app/schedule"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
 <label>Morning hour (0–23)</label><input name="hour" type="number" min="0" max="23" value="{_escape(schedule.get("hour", 6))}" required>
@@ -907,6 +945,96 @@ def create_web_router(
         except (TenantStoreError, DeliveryError):
             return _redirect("/app?notice=csrf_failed")
         return _redirect("/app?notice=email_saved")
+
+    @router.post("/app/connections/kit")
+    def start_kit_connection(request: Request, csrf_token: str = Form(...)):
+        context = authenticated_form(request, csrf_token)
+        if not context:
+            return _redirect("/app?notice=csrf_failed")
+        store, session = context
+        record = store.get(session.tenant_id)
+        if _requires_active_billing(store, record):
+            return _redirect("/app/billing")
+        billing = store.get_billing(record.tenant_id)
+        active_sources = [
+            item
+            for item in record.config.get("connections", [])
+            if item.get("status") == "verified"
+        ]
+        already_has_kit = any(item.get("provider") == "kit" for item in active_sources)
+        if billing and not already_has_kit and len(active_sources) >= billing.source_limit:
+            return _redirect("/app?notice=kit_failed")
+        try:
+            link = ComposioClient().create_kit_link(record.tenant_id)
+        except ComposioError:
+            return _redirect("/app?notice=kit_failed")
+        return RedirectResponse(link["redirect_url"], status_code=303)
+
+    @router.get("/app/connections/composio/verify")
+    def complete_composio_connection(request: Request, session_uri: str = ""):
+        """Composio callback identity verifier, bound to the Harbor web session."""
+        store = store_getter()
+        session = _session(request, store)
+        if not session:
+            return _redirect("/login")
+        record = store.get(session.tenant_id)
+        if _requires_active_billing(store, record):
+            return _redirect("/app/billing")
+        try:
+            composio = ComposioClient()
+            completed = composio.complete_auth(session_uri, record.tenant_id)
+            vendor_connection_id = completed["connected_account_id"]
+            composio.verify_kit_account(vendor_connection_id, record.tenant_id)
+            account_payload = composio.proxy_kit_get(vendor_connection_id, "account")
+            account = account_payload.get("account")
+            if not isinstance(account, dict) or account.get("id") is None:
+                raise ComposioError(
+                    "invalid_provider_response", "Kit account metadata is missing"
+                )
+            billing = store.get_billing(record.tenant_id)
+            existing = [
+                item
+                for item in record.config.get("connections", [])
+                if item.get("status") == "verified" and item.get("provider") != "kit"
+            ]
+            if billing and len(existing) >= billing.source_limit:
+                raise ComposioError("source_limit", "the plan source limit was reached")
+            connection_id = stable_harbor_connection_id(record.tenant_id, "kit")
+            connection = {
+                "id": connection_id,
+                "provider": "kit",
+                "status": "pending",
+                "settings": {
+                    "transport": "composio",
+                    "auth_mode": "composio_broker",
+                    "connected_account_id": vendor_connection_id,
+                    "recent_posts": 100,
+                    "publication_id": str(account["id"]),
+                    "publication_name": (
+                        account.get("name")
+                        if isinstance(account.get("name"), str)
+                        else "Kit newsletter"
+                    ),
+                },
+            }
+            store.upsert_connection(
+                record.tenant_id, connection, actor_type="web_portal"
+            )
+            store.record_connection_verification(
+                record.tenant_id,
+                connection_id,
+                {
+                    "status": "verified",
+                    "provider": "kit",
+                    "checked_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "publication_id": str(account["id"]),
+                    "publication_name": connection["settings"]["publication_name"],
+                },
+                actor_type="web_portal",
+            )
+        except (ComposioError, TenantStoreError):
+            return _redirect("/app?notice=kit_failed")
+        return _redirect("/app?notice=kit_ready")
 
     @router.post("/app/connection")
     def attach_connection(

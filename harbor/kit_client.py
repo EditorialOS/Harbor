@@ -16,6 +16,14 @@ from typing import Any
 
 KIT_BASE = os.environ.get("KIT_API_BASE", "https://api.kit.com/v4")
 
+_BROKER_OPERATIONS = {
+    "/account": "account",
+    "/subscribers": "subscribers",
+    "/account/growth_stats": "growth-stats",
+    "/broadcasts/stats": "broadcast-stats",
+    "/tags": "tags",
+}
+
 
 class KitError(Exception):
     def __init__(self, kind: str, detail: str):
@@ -45,7 +53,14 @@ def _get(
     base_url: str = KIT_BASE,
     auth_mode: str = "oauth_bearer",
 ) -> dict[str, Any]:
-    url = f"{base_url.rstrip('/')}{path}"
+    if auth_mode == "harbor_broker":
+        try:
+            operation = _BROKER_OPERATIONS[path]
+        except KeyError as error:
+            raise KitError("operation_not_allowed", "Kit operation is not allowed") from error
+        url = f"{base_url.rstrip('/')}/{operation}"
+    else:
+        url = f"{base_url.rstrip('/')}{path}"
     if params:
         filtered = {key: value for key, value in params.items() if value is not None}
         if filtered:
@@ -59,6 +74,12 @@ def _get(
         if not credential:
             raise KitError("missing_credential", "Kit API key is required")
         headers["X-Kit-Api-Key"] = credential
+    elif auth_mode == "harbor_broker":
+        if not credential:
+            raise KitError(
+                "missing_credential", "Harbor broker authorization is required"
+            )
+        headers["Authorization"] = f"Bearer {credential}"
     elif auth_mode != "sprite_connector":
         raise KitError("invalid_auth_mode", auth_mode)
 

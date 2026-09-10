@@ -108,14 +108,22 @@ class SpriteRunner:
             json.dumps(run_spec).encode(),
             mode="0600",
         )
-        output = self.client.exec(
-            sprite_name,
-            _SPRITE_PYTHON,
-            "-m",
-            "harbor.sprite_entrypoint",
-            "--spec",
-            spec_path,
-        )
+        try:
+            output = self.client.exec(
+                sprite_name,
+                _SPRITE_PYTHON,
+                "-m",
+                "harbor.sprite_entrypoint",
+                "--spec",
+                spec_path,
+            )
+        finally:
+            # Run specs can contain a short-lived Harbor broker grant. Remove
+            # the transient file even when worker execution fails.
+            try:
+                self.client.exec(sprite_name, "rm", "-f", spec_path)
+            except SpriteError:
+                pass
         try:
             return json.loads(output.decode())
         except Exception as e:
@@ -135,14 +143,20 @@ class SpriteRunner:
             json.dumps(connection_spec).encode(),
             mode="0600",
         )
-        output = self.client.exec(
-            sprite_name,
-            _SPRITE_PYTHON,
-            "-m",
-            "harbor.connection_probe",
-            "--spec",
-            spec_path,
-        )
+        try:
+            output = self.client.exec(
+                sprite_name,
+                _SPRITE_PYTHON,
+                "-m",
+                "harbor.connection_probe",
+                "--spec",
+                spec_path,
+            )
+        finally:
+            try:
+                self.client.exec(sprite_name, "rm", "-f", spec_path)
+            except SpriteError:
+                pass
         try:
             return json.loads(output.decode())
         except Exception as e:

@@ -2066,6 +2066,28 @@ class TenantStore:
         if rowcount != 1:
             raise TenantStoreError(f"unknown run '{run_id}'")
 
+    def run_is_active(self, tenant_id: str, run_id: str) -> bool:
+        """Authorize a transient broker grant only during its tenant run lease."""
+        placeholders = ("?", "?") if self.kind == "sqlite" else ("%s", "%s")
+        sql = (
+            "SELECT status,lease_expires_at FROM runs WHERE "
+            f"tenant_id={placeholders[0]} AND run_id={placeholders[1]}"
+        )
+        with self._connect() as conn:
+            if self.kind == "sqlite":
+                row = conn.execute(sql, (tenant_id, run_id)).fetchone()
+            else:
+                with conn.cursor() as cur:
+                    cur.execute(sql, (tenant_id, run_id))
+                    row = cur.fetchone()
+        if not row or row[0] != "running" or row[1] is None:
+            return False
+        try:
+            lease_expires_at = dt.datetime.fromisoformat(_time_text(row[1]) or "")
+        except ValueError:
+            return False
+        return lease_expires_at > dt.datetime.now(dt.timezone.utc)
+
     def get_run_by_idempotency(
         self, tenant_id: str, worker_id: str, idempotency_key: str
     ) -> RunRecord | None:

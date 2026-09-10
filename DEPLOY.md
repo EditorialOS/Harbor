@@ -17,6 +17,8 @@ Sprite file.
 - Auth0 tenant, API audience, and regular web application for MCP OAuth
 - Resend account and verified sending domain
 - Stripe account with three recurring monthly prices, portal, and webhook
+- Composio Pro project with Zero Data Retention for Kit OAuth (only when the
+  optional Kit source is enabled)
 - monitored alert destination
 
 ## Runtime settings
@@ -44,6 +46,24 @@ Required production configuration:
 | `HARBOR_MCP_RESOURCE` | Exact public MCP resource URL, without a trailing slash |
 | `HARBOR_OAUTH_AUDIENCE` | Same Auth0 API identifier as the MCP resource |
 | `HARBOR_OAUTH_ISSUER` | Auth0 tenant HTTPS origin with trailing slash |
+
+Optional Kit/Composio configuration is deliberately fail-closed. Kit is hidden
+until every setting below is present and both production-safety confirmations
+are explicitly enabled.
+
+| Setting | Purpose |
+| --- | --- |
+| `COMPOSIO_API_KEY` | Project key scoped to Connected Accounts read/write and Proxy Execute write |
+| `HARBOR_COMPOSIO_KIT_AUTH_CONFIG_ID` | Composio managed-OAuth auth config for the Kit toolkit |
+| `HARBOR_BROKER_SIGNING_KEY` | Random 32-byte-or-longer key for short-lived Sprite grants |
+| `HARBOR_COMPOSIO_ZDR_CONFIRMED` | Set `1` only after Zero Data Retention is enabled on the project |
+| `HARBOR_COMPOSIO_CALLBACK_VERIFICATION_CONFIRMED` | Set `1` only after the Harbor callback verifier URL is saved in Composio |
+
+The callback verifier is
+`https://<app-name>.fly.dev/app/connections/composio/verify`. The Composio
+project key remains on the control-plane Machine. Harbor sends a tenant Sprite
+only a short-lived, run-scoped Harbor grant; it cannot access another source or
+choose arbitrary provider endpoints. See `docs/COMPOSIO_KIT_SETUP.md`.
 
 Billing stays disabled until every Stripe item below has been verified. Existing
 non-billed pilot workspaces remain usable while `HARBOR_BILLING_REQUIRED` is
@@ -139,6 +159,11 @@ to Fly Connectors and persists only non-secret connector metadata.
 
 No customer needs `flyctl`, JSON, SSH, Python, or Sprite access. The older admin
 tenant/invitation APIs remain operator recovery tools, not the normal path.
+
+When Kit is enabled, the customer selects **Connect Kit** and completes Kit's
+hosted OAuth consent flow. No provider key is pasted into Harbor. Composio holds
+and refreshes the OAuth grant, while Harbor persists only its own stable source
+ID, the vendor connection ID, resource selection, and verification state.
 
 ## Rollback and recovery
 

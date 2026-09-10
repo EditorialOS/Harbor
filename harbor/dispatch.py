@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import os
 import re
 import secrets
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote, urlsplit
 
+from .broker_auth import BrokerAuthError, issue_broker_grant
 from .sprite_runner import SpriteRunner
 from .tenant_store import (
     RunRecord,
@@ -49,6 +53,54 @@ def build_run_spec(
     run_id: str,
     idempotency_key: str,
 ) -> dict[str, Any]:
+    connections = copy.deepcopy(record.config.get("connections", []))
+    for connection in connections:
+        settings = connection.get("settings") or {}
+        if connection.get("provider") != "kit" or settings.get("transport") != "composio":
+            continue
+        if connection.get("status") != "verified":
+            raise TenantStoreError("Kit connection is not verified")
+        public_url = os.environ.get("HARBOR_PUBLIC_URL")
+        if not public_url and os.environ.get("FLY_APP_NAME"):
+            public_url = f"https://{os.environ['FLY_APP_NAME']}.fly.dev"
+        parsed = urlsplit(public_url or "")
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise TenantStoreError(
+                "HARBOR_PUBLIC_URL must be an absolute HTTPS URL for Composio runs"
+            )
+        connection_id = str(connection.get("id") or "")
+        try:
+            grant = issue_broker_grant(
+                tenant_id=record.tenant_id,
+                connection_id=connection_id,
+                provider="kit",
+                run_id=run_id,
+            )
+        except BrokerAuthError as error:
+            raise TenantStoreError(str(error)) from error
+        runtime_settings = {
+            key: value
+            for key, value in settings.items()
+            if key not in {"connected_account_id", "auth_mode", "broker_base_url", "broker_authorization"}
+        }
+        runtime_settings.update(
+            {
+                "auth_mode": "harbor_broker",
+                "broker_base_url": (
+                    f"{public_url.rstrip('/')}/internal/providers/kit/"
+                    f"{quote(connection_id, safe='')}"
+                ),
+                "broker_authorization": grant,
+            }
+        )
+        connection["settings"] = runtime_settings
     return {
         "run_id": run_id,
         "idempotency_key_hash": hashlib.sha256(idempotency_key.encode()).hexdigest(),
@@ -61,7 +113,7 @@ def build_run_spec(
         # produce infrastructure-independent file artifacts inside the Sprite.
         "outputs": ["files"],
         "schedule": record.config.get("schedule", {}),
-        "connections": record.config.get("connections", []),
+        "connections": connections,
         "worker": worker_id,
         "input": inputs,
     }
@@ -136,7 +188,7 @@ def dispatch_worker(
             if result.get("status") == "completed" and delivery_handler is not None:
                 result["deliveries"] = delivery_handler(record, run_id, result)
                 validate_non_secret_metadata(result["deliveries"], "run.deliveries")
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - durable execution boundary
             # This is the execution boundary: third-party/runtime failures must
             # become durable failed attempts instead of terminating a caller.
             error_detail = _safe_error(error)

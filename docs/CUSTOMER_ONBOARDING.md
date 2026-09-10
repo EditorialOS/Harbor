@@ -8,14 +8,16 @@ terminal, JSON, SSH, or Sprite knowledge.
 3. Enter the code, workspace name, time zone, report hour, and delivery choice.
 4. Choose a monthly plan and complete Stripe's hosted Checkout when billing is
    enabled. Harbor then creates the private workspace computer automatically.
-5. In beehiiv, open **Settings → Integrations → API** and copy an active API key.
-6. In Harbor, paste the key into **Connect beehiiv**. Harbor sends it directly
-   to Fly's encrypted connector service and does not save it.
-7. If beehiiv shows more than one publication, choose the newsletter to analyze.
-8. Confirm the workspace shows **Ready**, **Connected**, and the desired next
+5. Connect a supported source. For beehiiv, open **Settings → Integrations →
+   API**, copy an active API key, and paste it into **Connect beehiiv**. Harbor
+   sends it directly to Fly's encrypted connector service and does not save it.
+   When Kit is enabled, choose **Connect Kit** and complete Kit's hosted consent
+   screen; no API key is pasted into Harbor.
+6. If the source shows more than one publication, choose the newsletter to analyze.
+7. Confirm the workspace shows **Ready**, **Connected**, and the desired next
    report time. Choose **Run Newsletter Intelligence** for the first report.
-9. Confirm the run completes and the report arrives at the configured email.
-10. In ChatGPT, connect the Harbor app and sign in with the same Harbor account.
+8. Confirm the run completes and the report arrives at the configured email.
+9. In ChatGPT, connect the Harbor app and sign in with the same Harbor account.
 
 If a step fails, Harbor shows the failure in the workspace. Retrying does not
 duplicate a completed run or delivery. Never send a beehiiv, Stripe, Fly, or

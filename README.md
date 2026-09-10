@@ -15,7 +15,9 @@ worker until its v3 reconciliation is complete.
 - Harbor's control plane and scheduler run on Fly Machines.
 - Postgres is the production system of record.
 - Every tenant gets one persistent, private Fly Sprite for worker execution.
-- Fly Connectors hold provider credentials and proxy approved API requests.
+- Fly Connectors hold Beehiiv credentials and proxy approved API requests.
+- Composio is an optional, replaceable transport for selected OAuth sources;
+  Kit is its first integration and remains disabled until live verification.
 - ChatGPT, web, email, MCP, and future surfaces are adapters over the same core.
 
 Provider credentials are never stored in Harbor's source, Postgres, tenant
@@ -64,6 +66,7 @@ limited to tests and local development.
 - `docs/KNOWN_LIMITATIONS.md` — explicit boundaries
 - `docs/SPRITES_LIVE_VERIFICATION.md` — Sprite acceptance checklist
 - `docs/PRODUCTION_PLAN.md` — fixed product architecture
+- `docs/COMPOSIO_KIT_SETUP.md` — staged Kit/Composio activation and verification
 
 Do not enable public paid signup until Stripe, a verified email-sending domain,
 external alerts, final legal terms, and the remaining live acceptance checks are

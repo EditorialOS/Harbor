@@ -67,14 +67,18 @@ class KitNewsletterConnector:
 
     def _auth(self, connection: ConnectionConfig) -> tuple[str, str | None, str | None]:
         auth_mode = connection.settings.get("auth_mode", "sprite_connector")
-        credential = (
-            resolve(connection.secret_ref, required=False)
-            if auth_mode in {"oauth_bearer", "api_key"}
-            else None
-        )
-        base_url = connection.settings.get(
-            "gateway_base_url"
-        ) or connection.settings.get("base_url")
+        if auth_mode == "harbor_broker":
+            credential = connection.settings.get("broker_authorization")
+            base_url = connection.settings.get("broker_base_url")
+        else:
+            credential = (
+                resolve(connection.secret_ref, required=False)
+                if auth_mode in {"oauth_bearer", "api_key"}
+                else None
+            )
+            base_url = connection.settings.get(
+                "gateway_base_url"
+            ) or connection.settings.get("base_url")
         return auth_mode, credential, base_url
 
     def discover(self, connection: ConnectionConfig) -> list[dict[str, str | None]]:

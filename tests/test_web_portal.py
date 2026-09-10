@@ -1,9 +1,9 @@
 import re
+from typing import ClassVar
 
 from fastapi.testclient import TestClient
 
-from harbor import control_plane
-from harbor import web_portal
+from harbor import control_plane, web_portal
 from harbor.outputs import AdapterReceipt
 from harbor.tenant_store import TenantStore
 
@@ -21,7 +21,7 @@ def _client(tmp_path, monkeypatch):
 
 
 class CapturingEmailAdapter:
-    messages = []
+    messages: ClassVar[list] = []
 
     def deliver(self, message, recipients, idempotency_key):
         self.messages.append((message, recipients, idempotency_key))
@@ -214,6 +214,85 @@ def test_web_session_is_tenant_derived_and_csrf_protected(tmp_path, monkeypatch)
         "minute": 15,
     }
     assert store.get("second").config["schedule"]["newsletter-intelligence"]["hour"] == 9
+
+
+def test_customer_connects_kit_with_hosted_oauth_and_no_secret_form(
+    tmp_path, monkeypatch
+):
+    store, client = _client(tmp_path, monkeypatch)
+    record, access_key = store.create_tenant(
+        "kit-customer",
+        "Kit Customer",
+        "UTC",
+        {
+            "workers": ["newsletter-intelligence"],
+            "outputs": ["files"],
+            "connections": [],
+        },
+    )
+    store.set_sprite(record.tenant_id, "harbor-kit-customer")
+
+    class FakeComposio:
+        def configured_for_kit(self):
+            return True
+
+        def create_kit_link(self, tenant_id):
+            assert tenant_id == "kit-customer"
+            return {
+                "connected_account_id": "ca_kit_customer",
+                "redirect_url": "https://connect.composio.dev/link/ln_customer",
+            }
+
+        def complete_auth(self, session_uri, tenant_id):
+            assert session_uri == "session://single-use"
+            assert tenant_id == "kit-customer"
+            return {"connected_account_id": "ca_kit_customer", "toolkit": "kit"}
+
+        def verify_kit_account(self, connection_id, tenant_id):
+            assert connection_id == "ca_kit_customer"
+            assert tenant_id == "kit-customer"
+            return {"status": "ACTIVE"}
+
+        def proxy_kit_get(self, connection_id, operation):
+            assert (connection_id, operation) == ("ca_kit_customer", "account")
+            return {"account": {"id": 29, "name": "Kit Signal"}}
+
+    monkeypatch.setattr(web_portal, "ComposioClient", FakeComposio)
+    login = client.post(
+        "/login",
+        data={"tenant_id": record.tenant_id, "access_key": access_key},
+        follow_redirects=False,
+    )
+    assert login.status_code == 303
+    dashboard = client.get("/app")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text).group(1)
+    assert "Connect Kit" in dashboard.text
+    assert 'action="/app/connections/kit"' in dashboard.text
+
+    started = client.post(
+        "/app/connections/kit",
+        data={"csrf_token": csrf},
+        follow_redirects=False,
+    )
+    assert started.status_code == 303
+    assert started.headers["location"] == (
+        "https://connect.composio.dev/link/ln_customer"
+    )
+
+    completed = client.get(
+        "/app/connections/composio/verify",
+        params={"session_uri": "session://single-use"},
+        follow_redirects=False,
+    )
+    assert completed.status_code == 303
+    assert completed.headers["location"] == "/app?notice=kit_ready"
+    connection = store.get("kit-customer").config["connections"][0]
+    assert connection["provider"] == "kit"
+    assert connection["status"] == "verified"
+    assert connection["settings"]["transport"] == "composio"
+    assert connection["id"].startswith("kit-")
+    assert connection["settings"]["connected_account_id"] == "ca_kit_customer"
+    assert "credential" not in str(connection).lower()
 
 
 def test_failed_onboarding_provisioning_is_visible_and_persisted(

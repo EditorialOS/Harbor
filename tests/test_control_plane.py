@@ -3,8 +3,10 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
+from starlette.requests import Request
 
 from harbor import control_plane
+from harbor.broker_auth import issue_broker_grant
 from harbor.oauth import OAuthConfig
 from harbor.tenant_store import TenantStore, TenantStoreError
 
@@ -238,6 +240,97 @@ def test_schedule_change_preserves_latest_scheduled_run_history(tmp_path, monkey
     assert state.last_window_key == window
     assert state.last_status == "completed"
     assert state.attempt_count == 1
+
+
+def test_kit_provider_broker_revalidates_tenant_connection_and_operation(
+    tmp_path, monkeypatch
+):
+    store, _ = _tenant_store(tmp_path)
+    store.upsert_connection(
+        "acme",
+        {
+            "id": "kit-acme-source",
+            "provider": "kit",
+            "status": "verified",
+            "settings": {
+                "transport": "composio",
+                "connected_account_id": "ca_kit_vendor",
+                "publication_id": "29",
+            },
+        },
+    )
+    monkeypatch.setattr(control_plane, "store", store)
+    signing_key = "test-broker-signing-key-with-more-than-32-bytes"
+    monkeypatch.setenv("HARBOR_BROKER_SIGNING_KEY", signing_key)
+    calls = []
+
+    class FakeComposio:
+        def proxy_kit_get(self, connection_id, operation, query):
+            calls.append((connection_id, operation, query))
+            return {"account": {"id": 29}}
+
+    monkeypatch.setattr(control_plane, "ComposioClient", FakeComposio)
+    assert store.claim_run(
+        "run_one", "acme", "newsletter-intelligence", "broker-window"
+    )
+    store.begin_run_attempt("run_one")
+    grant = issue_broker_grant(
+        tenant_id="acme",
+        connection_id="kit-acme-source",
+        provider="kit",
+        run_id="run_one",
+        signing_key=signing_key,
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [],
+            "query_string": b"",
+        }
+    )
+
+    result = control_plane.kit_provider_broker(
+        "kit-acme-source", "account", request, authorization=f"Bearer {grant}"
+    )
+    assert result == {"account": {"id": 29}}
+    assert calls == [("ca_kit_vendor", "account", {})]
+
+    other_connection_grant = issue_broker_grant(
+        tenant_id="acme",
+        connection_id="ca_other",
+        provider="kit",
+        run_id="run_one",
+        signing_key=signing_key,
+    )
+    with pytest.raises(HTTPException) as denied:
+        control_plane.kit_provider_broker(
+            "kit-acme-source",
+            "account",
+            request,
+            authorization=f"Bearer {other_connection_grant}",
+        )
+    assert denied.value.status_code == 401
+
+    with pytest.raises(HTTPException) as unknown_operation:
+        control_plane.kit_provider_broker(
+            "kit-acme-source",
+            "delete-account",
+            request,
+            authorization=f"Bearer {grant}",
+        )
+    assert unknown_operation.value.status_code == 404
+
+    store.finish_run("run_one", "completed", {"status": "completed"})
+    with pytest.raises(HTTPException) as replayed:
+        control_plane.kit_provider_broker(
+            "kit-acme-source",
+            "account",
+            request,
+            authorization=f"Bearer {grant}",
+        )
+    assert replayed.value.status_code == 401
 
 
 def test_tenant_can_create_independent_report_schedule(tmp_path, monkeypatch):

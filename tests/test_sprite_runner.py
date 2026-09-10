@@ -102,6 +102,10 @@ def test_run_uses_private_unique_internal_spec_path(monkeypatch, tmp_path: Path)
     assert client.writes[0][1] == "/tmp/harbor-runs/run_safe-123.json"
     assert client.writes[0][3] == "0600"
     assert client.commands[0][1][0] == "/.sprite/bin/python3"
+    assert client.commands[-1] == (
+        "tenant-sprite",
+        ("rm", "-f", "/tmp/harbor-runs/run_safe-123.json"),
+    )
 
 
 def test_run_upgrades_stale_runtime_once(monkeypatch, tmp_path: Path):
@@ -165,6 +169,7 @@ def test_connection_probe_uses_private_random_internal_spec_path(
         "-m",
         "harbor.connection_probe",
     )
+    assert client.commands[-1][1][:2] == ("rm", "-f")
 
 
 def test_read_report_accepts_only_fixed_workspace_report_paths():
