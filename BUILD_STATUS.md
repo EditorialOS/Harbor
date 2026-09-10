@@ -1,4 +1,4 @@
-# Build status — Harbor 1.0.0 release candidate 1
+# Build status — Harbor 1.0.0 release candidate 5
 
 Harbor's first commercial product loop is implemented. This is a release
 candidate, not a production-ready declaration; remaining gates require external

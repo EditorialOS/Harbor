@@ -1,4 +1,5 @@
 import contextlib
+from typing import ClassVar
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -6,8 +7,8 @@ from mcp.server.auth.provider import AccessToken
 
 from harbor import mcp_server
 from harbor.oauth import OAuthConfig
-from harbor.remote_mcp import create_remote_mcp
-from harbor.tenant_store import TenantStore
+from harbor.remote_mcp import _public_run, create_remote_mcp
+from harbor.tenant_store import RunRecord, TenantStore
 
 
 def _request(client, key, method, params=None):
@@ -40,6 +41,47 @@ def test_local_mcp_tools_import_with_v2_sdk():
     assert mcp_server.app is not None
 
 
+def test_public_run_removes_internal_delivery_identifiers():
+    record = RunRecord(
+        "run_public",
+        "internal-tenant-id",
+        "newsletter-intelligence",
+        "internal-idempotency-key",
+        "completed",
+        {
+            "summary": "A useful summary.",
+            "deliveries": [
+                {
+                    "delivery_id": "delivery_internal",
+                    "provider_message_id": "provider_internal",
+                    "adapter": "email",
+                    "status": "delivered",
+                    "attempt_count": 1,
+                    "duplicate_suppressed": False,
+                }
+            ],
+        },
+        "2026-09-09T12:00:00+00:00",
+        "2026-09-09T12:01:00+00:00",
+        1,
+        None,
+        None,
+    )
+
+    public = _public_run(record)
+
+    assert public["run_id"] == "run_public"
+    assert public["deliveries"] == [
+        {
+            "adapter": "email",
+            "status": "delivered",
+            "attempt_count": 1,
+            "duplicate_suppressed": False,
+        }
+    ]
+    assert "internal" not in str(public)
+
+
 def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkeypatch):
     monkeypatch.setenv("HARBOR_PUBLIC_URL", "http://testserver")
     store = TenantStore(f"sqlite:///{tmp_path / 'remote-mcp.db'}")
@@ -62,7 +104,7 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
     store.set_sprite("acme", "harbor-acme")
 
     class Runner:
-        calls = []
+        calls: ClassVar[list] = []
 
         def run(self, sprite_name, run_spec):
             self.calls.append((sprite_name, run_spec))
@@ -125,9 +167,38 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
         assert "tenant_id" not in str(schemas)
         assert "path" not in str(schemas).lower()
         assert "input" not in schemas["harbor_run_worker"]["properties"]
+        assert schemas["harbor_recent_runs"]["properties"]["limit"] == {
+            "default": 10,
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer",
+        }
+        assert schemas["harbor_run_worker"]["properties"]["worker_id"][
+            "maxLength"
+        ] == 100
         tools = {
             tool["name"]: tool for tool in listed.json()["result"]["tools"]
         }
+        assert set(tools["harbor_status"]["outputSchema"]["properties"]) == {
+            "name",
+            "timezone",
+            "sprite_provisioned",
+            "enabled_workers",
+            "outputs",
+            "billing",
+            "connections",
+        }
+        assert set(tools["harbor_recent_runs"]["outputSchema"]["properties"]) == {
+            "runs"
+        }
+        assert "properties" in tools["harbor_dashboard"]["outputSchema"]
+        assert "additionalProperties" not in tools["harbor_dashboard"]["outputSchema"]
+        assert tools["harbor_status"]["title"] == "Check Harbor workspace status"
+        assert tools["harbor_recent_runs"]["title"] == "List recent Harbor runs"
+        assert "may send the configured report email" in tools[
+            "harbor_run_worker"
+        ]["description"]
         for name in (
             "harbor_dashboard",
             "harbor_worker_catalog",
@@ -192,8 +263,10 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
             "tools/call",
             {"name": "harbor_status", "arguments": {}},
         ).json()["result"]["structuredContent"]
-        assert status_a["tenant_id"] == "acme"
-        assert status_b["tenant_id"] == "beta"
+        assert status_a["name"] == "Acme"
+        assert status_b["name"] == "Beta"
+        assert "tenant_id" not in status_a
+        assert "tenant_id" not in status_b
 
         run_params = {
             "name": "harbor_run_worker",
@@ -221,6 +294,7 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
         assert dashboard["latest_intelligence"]["intelligence"]["recommendations"] == [
             "Reuse the subject structure."
         ]
+        assert "post_latest" not in str(dashboard)
         assert "private-report.md" not in str(dashboard)
 
         runs_a = _request(
@@ -321,4 +395,5 @@ def test_remote_mcp_oauth_challenge_scopes_and_tenant_resolution(tmp_path, monke
             "tools/call",
             {"name": "harbor_status", "arguments": {}},
         ).json()["result"]["structuredContent"]
-        assert status["tenant_id"] == "acme"
+        assert status["name"] == "Acme"
+        assert "tenant_id" not in status

@@ -192,7 +192,7 @@ HARBOR_APP_HTML = r"""<!doctype html>
     async function connect() {
       try {
         await request("ui/initialize", {
-          appInfo: { name: "Harbor", version: "1.0.0-rc.4" },
+          appInfo: { name: "Harbor", version: "1.0.0-rc.5" },
           appCapabilities: {},
           protocolVersion: "2026-01-26"
         });

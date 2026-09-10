@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import secrets
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any, NotRequired, TypedDict
 from urllib.parse import urlsplit
 
 from mcp.server import MCPServer
@@ -16,6 +16,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import Context
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from .billing import billing_is_active
 from .chatgpt_ui import HARBOR_APP_HTML, HARBOR_APP_URI
@@ -27,6 +28,145 @@ from .tenant_store import RunRecord, TenantRecord, TenantStore, TenantStoreError
 from .worker import catalog as worker_catalog
 from .workers import alex as _alex  # noqa: F401
 from .workers import newsletter_intelligence as _newsletter  # noqa: F401
+
+
+class PublicDelivery(TypedDict):
+    adapter: str | None
+    status: str | None
+    attempt_count: int | None
+    duplicate_suppressed: bool | None
+
+
+class PublicRun(TypedDict):
+    run_id: str
+    worker_id: str
+    status: str
+    summary: str | None
+    attempt_count: int
+    started_at: str
+    finished_at: str | None
+    deliveries: list[PublicDelivery]
+    error: str | None
+
+
+class PublicPost(TypedDict):
+    title: str | None
+    published: str | None
+    recipients: int | None
+    delivered: int | None
+    open_rate: float | None
+    click_rate: float | None
+    unsubscribes: int | None
+    spam_reports: int | None
+    web_views: int | None
+
+
+class PublicIntelligence(TypedDict):
+    what_changed: list[str]
+    why_it_matters: list[str]
+    trends: list[str]
+    audience_signals: list[str]
+    recommendations: list[str]
+    anomalies: list[str]
+    headline: str | None
+    strongest_open: PublicPost | None
+    weakest_open: PublicPost | None
+    strongest_click: PublicPost | None
+    weakest_click: PublicPost | None
+
+
+class PublicMetrics(TypedDict):
+    publication_name: str | None
+    active_subscribers: int | None
+    active_free_subscribers: int | None
+    active_premium_subscribers: int | None
+    avg_open_rate: float | None
+    avg_click_rate: float | None
+    latest_post: PublicPost | None
+
+
+class LatestIntelligence(TypedDict):
+    run_id: str
+    summary: str | None
+    finished_at: str | None
+    metrics: PublicMetrics
+    intelligence: PublicIntelligence
+
+
+class PublicWorker(TypedDict):
+    id: str
+    label: str
+    enabled: bool
+    runnable: bool
+
+
+class PublicSource(TypedDict):
+    provider: str | None
+    label: str
+    status: str
+    last_verified_at: str | None
+
+
+class WorkspaceSummary(TypedDict):
+    name: str
+    timezone: str
+    sprite_provisioned: bool
+
+
+class DashboardOutput(TypedDict):
+    workspace: WorkspaceSummary
+    connection_status: str
+    sources: list[PublicSource]
+    workers: list[PublicWorker]
+    recent_runs: list[PublicRun]
+    latest_intelligence: LatestIntelligence | None
+
+
+class WorkerCatalogOutput(TypedDict):
+    workers: list[PublicWorker]
+
+
+class BillingSummary(TypedDict):
+    required: bool
+    plan: str | None
+    status: str
+
+
+class ConnectionSummary(TypedDict):
+    provider: str | None
+    status: str | None
+    last_verified_at: str | None
+
+
+class StatusOutput(TypedDict):
+    name: str
+    timezone: str
+    sprite_provisioned: bool
+    enabled_workers: list[str]
+    outputs: list[str]
+    billing: BillingSummary
+    connections: list[ConnectionSummary]
+
+
+class EnabledWorkersOutput(TypedDict):
+    workers: list[str]
+
+
+class RecentRunsOutput(TypedDict):
+    runs: list[PublicRun]
+
+
+class RunWorkerOutput(TypedDict):
+    run_id: str
+    status: str
+    duplicate_suppressed: NotRequired[bool]
+    worker_id: NotRequired[str]
+    summary: NotRequired[str | None]
+    attempt_count: NotRequired[int | None]
+    started_at: NotRequired[str]
+    finished_at: NotRequired[str | None]
+    deliveries: NotRequired[list[PublicDelivery]]
+    error: NotRequired[str | None]
 
 
 def _bearer(headers: Any) -> str:
@@ -51,7 +191,25 @@ def _tenant_for_context(ctx: Context, store: TenantStore) -> TenantRecord:
     return tenant
 
 
-def _public_run(record: RunRecord) -> dict[str, Any]:
+def _public_deliveries(value: Any) -> list[PublicDelivery]:
+    if not isinstance(value, list):
+        return []
+    return [
+        {
+            key: delivery.get(key)
+            for key in (
+                "adapter",
+                "status",
+                "attempt_count",
+                "duplicate_suppressed",
+            )
+        }
+        for delivery in value
+        if isinstance(delivery, dict)
+    ]
+
+
+def _public_run(record: RunRecord) -> PublicRun:
     result = record.result or {}
     return {
         "run_id": record.run_id,
@@ -61,18 +219,17 @@ def _public_run(record: RunRecord) -> dict[str, Any]:
         "attempt_count": record.attempt_count,
         "started_at": record.started_at,
         "finished_at": record.finished_at,
-        "deliveries": result.get("deliveries", []),
+        "deliveries": _public_deliveries(result.get("deliveries")),
         "error": record.last_error if record.status == "failed" else None,
     }
 
 
-def _safe_post(value: Any) -> dict[str, Any] | None:
+def _safe_post(value: Any) -> PublicPost | None:
     if not isinstance(value, dict):
         return None
     return {
         key: value.get(key)
         for key in (
-            "id",
             "title",
             "published",
             "recipients",
@@ -128,7 +285,7 @@ def _safe_intelligence(result: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _dashboard_payload(store: TenantStore, tenant: TenantRecord) -> dict[str, Any]:
+def _dashboard_payload(store: TenantStore, tenant: TenantRecord) -> DashboardOutput:
     runs = store.list_runs(tenant.tenant_id, limit=10)
     latest = None
     for record in runs:
@@ -297,7 +454,7 @@ def create_remote_mcp(
             "openai/toolInvocation/invoked": "Harbor is ready.",
         },
     )
-    def dashboard(ctx: Context) -> dict[str, Any]:
+    def dashboard(ctx: Context) -> DashboardOutput:
         tenant = _tenant_for_context(ctx, store)
         return _dashboard_payload(store, tenant)
 
@@ -321,6 +478,11 @@ def create_remote_mcp(
 
     @server.tool(
         name="harbor_worker_catalog",
+        title="List available Harbor workers",
+        description=(
+            "List Harbor workers for the authenticated workspace and show whether "
+            "each worker is enabled and runnable. This does not run a worker."
+        ),
         annotations=ToolAnnotations(
             readOnlyHint=True,
             openWorldHint=False,
@@ -328,7 +490,7 @@ def create_remote_mcp(
         ),
         meta={"securitySchemes": read_security},
     )
-    def catalog(ctx: Context) -> dict[str, Any]:
+    def catalog(ctx: Context) -> WorkerCatalogOutput:
         """List Harbor workers and whether they are enabled and runnable."""
         tenant = _tenant_for_context(ctx, store)
         enabled = set(tenant.config.get("workers", []))
@@ -345,6 +507,11 @@ def create_remote_mcp(
 
     @server.tool(
         name="harbor_status",
+        title="Check Harbor workspace status",
+        description=(
+            "Check provisioning, enabled workers, outputs, billing entitlement, and "
+            "redacted source-connection status for the authenticated workspace."
+        ),
         annotations=ToolAnnotations(
             readOnlyHint=True,
             openWorldHint=False,
@@ -352,12 +519,11 @@ def create_remote_mcp(
         ),
         meta={"securitySchemes": read_security},
     )
-    def status(ctx: Context) -> dict[str, Any]:
+    def status(ctx: Context) -> StatusOutput:
         """Get safe status for the authenticated Harbor workspace."""
         tenant = _tenant_for_context(ctx, store)
         billing = store.get_billing(tenant.tenant_id)
         return {
-            "tenant_id": tenant.tenant_id,
             "name": tenant.name,
             "timezone": tenant.timezone,
             "sprite_provisioned": bool(tenant.sprite_name),
@@ -380,6 +546,11 @@ def create_remote_mcp(
 
     @server.tool(
         name="harbor_enabled_workers",
+        title="List enabled Harbor workers",
+        description=(
+            "List only the workers enabled for the authenticated workspace. This "
+            "does not run a worker or change workspace settings."
+        ),
         annotations=ToolAnnotations(
             readOnlyHint=True,
             openWorldHint=False,
@@ -387,13 +558,18 @@ def create_remote_mcp(
         ),
         meta={"securitySchemes": read_security},
     )
-    def enabled_workers(ctx: Context) -> dict[str, Any]:
+    def enabled_workers(ctx: Context) -> EnabledWorkersOutput:
         """List workers enabled for the authenticated workspace."""
         tenant = _tenant_for_context(ctx, store)
         return {"workers": tenant.config.get("workers", [])}
 
     @server.tool(
         name="harbor_recent_runs",
+        title="List recent Harbor runs",
+        description=(
+            "List recent worker runs for the authenticated workspace, including "
+            "status, safe summary, attempts, timing, delivery status, and safe errors."
+        ),
         annotations=ToolAnnotations(
             readOnlyHint=True,
             openWorldHint=False,
@@ -401,7 +577,10 @@ def create_remote_mcp(
         ),
         meta={"securitySchemes": read_security},
     )
-    def recent_runs(ctx: Context, limit: int = 10) -> dict[str, Any]:
+    def recent_runs(
+        ctx: Context,
+        limit: Annotated[int, Field(ge=1, le=100)] = 10,
+    ) -> RecentRunsOutput:
         """List recent run status without exposing tenant filesystem paths."""
         tenant = _tenant_for_context(ctx, store)
         return {
@@ -412,6 +591,13 @@ def create_remote_mcp(
 
     @server.tool(
         name="harbor_run_worker",
+        title="Run an enabled Harbor worker",
+        description=(
+            "Run one enabled worker in the authenticated workspace's private Sprite. "
+            "This writes run and report state, reads the configured external source, "
+            "and may send the configured report email. Retrying with the same "
+            "idempotency key will not duplicate the run or delivery."
+        ),
         annotations=ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=True,
@@ -422,9 +608,10 @@ def create_remote_mcp(
     )
     def run_worker(
         ctx: Context,
-        worker_id: str,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
+        worker_id: Annotated[str, Field(min_length=1, max_length=100)],
+        idempotency_key: Annotated[str, Field(min_length=1, max_length=255)]
+        | None = None,
+    ) -> RunWorkerOutput:
         """Run one enabled worker in the authenticated tenant's private Sprite."""
         tenant = _tenant_for_context(ctx, store)
         if tenant.config.get("billing_required") and not billing_is_active(
@@ -469,7 +656,7 @@ def create_remote_mcp(
             "status": result.get("status"),
             "summary": result.get("summary"),
             "attempt_count": result.get("attempts"),
-            "deliveries": result.get("deliveries", []),
+            "deliveries": _public_deliveries(result.get("deliveries")),
         }
 
     asgi = server.streamable_http_app(
