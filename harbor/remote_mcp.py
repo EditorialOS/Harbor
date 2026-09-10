@@ -281,8 +281,10 @@ def create_remote_mcp(
         name="harbor_dashboard",
         title="Show Harbor dashboard",
         description=(
-            "Render the authenticated workspace’s latest intelligence, sources, "
-            "workers, recommendations, runs, and connection status."
+            "Show a concise card for the authenticated workspace’s latest intelligence. "
+            "After the card, explain the remaining real-data analysis in the conversation: "
+            "trends, strongest and weakest content, audience signals, recommendations, "
+            "and anomalies. Do not repeat the card or invent missing insights."
         ),
         annotations=ToolAnnotations(
             readOnlyHint=True,
@@ -306,6 +308,10 @@ def create_remote_mcp(
         instructions=(
             "Use Harbor to inspect and run workers for the authenticated workspace. "
             "Use harbor_dashboard when the user asks to see or open Harbor. "
+            "After harbor_dashboard renders its concise card, use the returned data to "
+            "write the deeper analysis below it in the conversation. Cover trends, "
+            "strongest and weakest content, audience signals, recommendations, and "
+            "anomalies when present; omit empty sections and never invent data. "
             "Tenant identity always comes from the bearer credential."
         ),
         auth=auth_settings,

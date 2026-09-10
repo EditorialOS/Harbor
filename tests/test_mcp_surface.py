@@ -147,27 +147,33 @@ def test_remote_mcp_auth_tools_tenant_isolation_and_idempotency(tmp_path, monkey
             "idempotentHint": True,
         }
         assert tools["harbor_dashboard"]["_meta"]["ui"] == {
-            "resourceUri": "ui://harbor/dashboard-v1.html",
+            "resourceUri": "ui://harbor/intelligence-summary-v1.html",
             "visibility": ["model", "app"],
         }
 
         resources = _request(client, key_a, "resources/list").json()["result"][
             "resources"
         ]
-        assert resources[0]["uri"] == "ui://harbor/dashboard-v1.html"
+        assert resources[0]["uri"] == "ui://harbor/intelligence-summary-v1.html"
         assert resources[0]["mimeType"] == "text/html;profile=mcp-app"
         resource = _request(
             client,
             key_a,
             "resources/read",
-            {"uri": "ui://harbor/dashboard-v1.html"},
+            {"uri": "ui://harbor/intelligence-summary-v1.html"},
         ).json()["result"]["contents"][0]
         assert resource["mimeType"] == "text/html;profile=mcp-app"
         assert 'request("ui/initialize"' in resource["text"]
         assert 'notify("ui/notifications/initialized"' in resource["text"]
         assert 'protocolVersion: "2026-01-26"' in resource["text"]
         assert "ui/notifications/tool-result" in resource["text"]
-        assert "harbor_run_worker" in resource["text"]
+        assert "Detailed recommendations and supporting analysis continue below" in resource["text"]
+        assert "What changed" in resource["text"]
+        assert "Why it matters" in resource["text"]
+        assert "Top action" in resource["text"]
+        assert "<select" not in resource["text"]
+        assert "class=\"tabs\"" not in resource["text"]
+        assert "overflow-y" not in resource["text"]
 
         status_a = _request(
             client,
