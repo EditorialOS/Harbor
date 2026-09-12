@@ -77,7 +77,8 @@ form.inline{display:inline}form.inline button{margin:0}.actions{display:flex;gap
         status_code=status_code,
     )
     response.headers["Content-Security-Policy"] = (
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
+        "default-src 'none'; style-src 'unsafe-inline'; "
+        "form-action 'self' https://connect.composio.dev https://dashboard.composio.dev; "
         "base-uri 'none'; frame-ancestors 'none'"
     )
     response.headers["Referrer-Policy"] = "no-referrer"

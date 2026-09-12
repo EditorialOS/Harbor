@@ -125,6 +125,10 @@ def test_public_legal_status_pages_and_security_headers(tmp_path, monkeypatch):
     assert status.headers["Permissions-Policy"] == (
         "camera=(), microphone=(), geolocation=()"
     )
+    policy = status.headers["Content-Security-Policy"]
+    assert "form-action 'self'" in policy
+    assert "https://connect.composio.dev" in policy
+    assert "https://dashboard.composio.dev" in policy
 
 
 def test_customer_signs_in_with_single_use_email_code(tmp_path, monkeypatch):
