@@ -220,6 +220,100 @@ def test_web_session_is_tenant_derived_and_csrf_protected(tmp_path, monkeypatch)
     assert store.get("second").config["schedule"]["newsletter-intelligence"]["hour"] == 9
 
 
+def test_customer_selects_kit_for_scheduled_and_manual_reports(tmp_path, monkeypatch):
+    store, client = _client(tmp_path, monkeypatch)
+    record, access_key = store.create_tenant(
+        "source-choice",
+        "Source Choice",
+        "UTC",
+        {
+            "workers": ["newsletter-intelligence"],
+            "schedule": {"newsletter-intelligence": {"hour": 6, "minute": 0}},
+            "outputs": ["files"],
+            "connections": [],
+        },
+    )
+    store.set_sprite(record.tenant_id, "harbor-source-choice")
+    for source_id, provider in (("bee-local", "beehiiv"), ("kit-local", "kit")):
+        store.upsert_connection(
+            record.tenant_id,
+            {
+                "id": source_id,
+                "provider": provider,
+                "status": "verified",
+                "settings": {"publication_name": provider.title()},
+            },
+        )
+    other, _ = store.create_tenant(
+        "other-source", "Other Source", "UTC", {"workers": [], "connections": []}
+    )
+    store.upsert_connection(
+        other.tenant_id,
+        {"id": "kit-other", "provider": "kit", "status": "verified", "settings": {}},
+    )
+
+    class CapturingRunner:
+        specs: ClassVar[list] = []
+
+        def run(self, sprite_name, run_spec):
+            self.specs.append(run_spec)
+            return {"status": "completed", "summary": "selected source ran"}
+
+    CapturingRunner.specs = []
+    monkeypatch.setattr(control_plane, "SpriteRunner", CapturingRunner)
+    client.post(
+        "/login",
+        data={"tenant_id": record.tenant_id, "access_key": access_key},
+        follow_redirects=False,
+    )
+    dashboard = client.get("/app")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', dashboard.text).group(1)
+    assert 'value="kit-local"' in dashboard.text
+    assert 'value="kit-other"' not in dashboard.text
+
+    rejected = client.post(
+        "/app/schedule",
+        data={
+            "csrf_token": csrf,
+            "hour": "7",
+            "minute": "0",
+            "timezone": "UTC",
+            "connection_id": "kit-other",
+        },
+        follow_redirects=False,
+    )
+    assert rejected.headers["location"] == "/app?notice=source_invalid"
+
+    saved = client.post(
+        "/app/schedule",
+        data={
+            "csrf_token": csrf,
+            "hour": "7",
+            "minute": "0",
+            "timezone": "UTC",
+            "connection_id": "kit-local",
+        },
+        follow_redirects=False,
+    )
+    assert saved.headers["location"] == "/app?notice=schedule_saved"
+    assert store.get(record.tenant_id).config["schedule"]["newsletter-intelligence"] == {
+        "hour": 7,
+        "minute": 0,
+        "connection_id": "kit-local",
+    }
+
+    ran = client.post(
+        "/app/run",
+        data={"csrf_token": csrf, "idempotency_key": "web_source_choice_test_001"},
+        follow_redirects=False,
+    )
+    assert ran.headers["location"] == "/app?notice=run_completed"
+    assert CapturingRunner.specs[0]["input"] == {"connection_id": "kit-local"}
+    assert [item["id"] for item in CapturingRunner.specs[0]["connections"]] == [
+        "kit-local"
+    ]
+
+
 def test_customer_connects_kit_with_hosted_oauth_and_no_secret_form(
     tmp_path, monkeypatch
 ):

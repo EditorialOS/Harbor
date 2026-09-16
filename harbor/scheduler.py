@@ -244,13 +244,20 @@ def configured_jobs(tenant: TenantRecord) -> list[ScheduledJob]:
     for worker_id, raw_schedule in legacy.items():
         if worker_id in modern_workers or worker_id not in tenant.config.get("workers", []):
             continue
+        source_id = (
+            raw_schedule.get("connection_id")
+            if isinstance(raw_schedule, dict)
+            else None
+        )
+        if source_id is not None and (not isinstance(source_id, str) or not source_id):
+            raise ValueError("scheduled source must be a non-empty connection id")
         jobs.append(
             ScheduledJob(
                 schedule_id=worker_id,
                 state_id=worker_id,
                 worker_id=worker_id,
                 schedule=parse_report_schedule(raw_schedule),
-                inputs={},
+                inputs={"connection_id": source_id} if source_id else {},
             )
         )
     return jobs

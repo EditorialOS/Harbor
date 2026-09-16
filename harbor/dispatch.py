@@ -54,6 +54,21 @@ def build_run_spec(
     idempotency_key: str,
 ) -> dict[str, Any]:
     connections = copy.deepcopy(record.config.get("connections", []))
+    if worker_id == "newsletter-intelligence":
+        selected_ids = inputs.get("connection_ids")
+        if selected_ids is None and inputs.get("connection_id"):
+            selected_ids = [inputs["connection_id"]]
+        if selected_ids:
+            if not isinstance(selected_ids, list) or not all(
+                isinstance(item, str) and item for item in selected_ids
+            ):
+                raise TenantStoreError("selected newsletter sources are invalid")
+            requested = set(selected_ids)
+            connections = [
+                item for item in connections if item.get("id") in requested
+            ]
+            if {item.get("id") for item in connections} != requested:
+                raise TenantStoreError("selected newsletter source is not connected")
     for connection in connections:
         settings = connection.get("settings") or {}
         if connection.get("provider") != "kit" or settings.get("transport") != "composio":
@@ -178,11 +193,13 @@ def dispatch_worker(
         store.finish_run(run_id, "failed", failure)
         raise RunExecutionFailed(run_id, failure)
 
-    run_spec = build_run_spec(record, worker_id, inputs, run_id, idempotency_key)
     last_result: dict[str, Any] | None = None
     for attempt in range(previous_attempts + 1, max_attempts + 1):
         store.begin_run_attempt(run_id, lease_seconds=run_lease_seconds)
         try:
+            run_spec = build_run_spec(
+                record, worker_id, inputs, run_id, idempotency_key
+            )
             result = runner.run(record.sprite_name, run_spec)
             validate_non_secret_metadata(result, "run.result")
             if result.get("status") == "completed" and delivery_handler is not None:

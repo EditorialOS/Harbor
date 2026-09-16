@@ -17,7 +17,8 @@ worker until its v3 reconciliation is complete.
 - Every tenant gets one persistent, private Fly Sprite for worker execution.
 - Fly Connectors hold Beehiiv credentials and proxy approved API requests.
 - Composio is an optional, replaceable transport for selected OAuth sources;
-  Kit is its first integration and remains disabled until live verification.
+  Kit is its first integration. Its customer connection and live report still
+  require release acceptance before Kit is advertised as a supported source.
 - ChatGPT, web, email, MCP, and future surfaces are adapters over the same core.
 
 Provider credentials are never stored in Harbor's source, Postgres, tenant
@@ -26,7 +27,7 @@ are visible and durable; there is no automatic sample-data fallback.
 
 ## Current release
 
-`1.0.0-rc.5` is a release candidate, not a production-ready declaration. The
+`1.0.0-rc.6` is a release candidate, not a production-ready declaration. The
 pilot flow has been executed on Fly with Postgres, two isolated Sprites, a real
 beehiiv connector, scheduled runs, persisted reports, email delivery, and an
 OAuth-authenticated ChatGPT app. See `docs/LIVE_ACCEPTANCE_EVIDENCE.md` for

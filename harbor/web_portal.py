@@ -280,6 +280,7 @@ def _provision(store: TenantStore, runner: Any, tenant_id: str) -> bool:
 def _notice(value: str | None) -> str:
     messages = {
         "schedule_saved": "Your delivery schedule was saved.",
+        "source_invalid": "That report source is not verified in this workspace. Choose a connected source and try again.",
         "email_saved": "Your email delivery setting was saved.",
         "connection_ready": "Your beehiiv connection was verified.",
         "connection_select": "Your beehiiv account is connected. Choose the newsletter Harbor should analyze.",
@@ -688,6 +689,7 @@ def create_web_router(
         schedule = (record.config.get("schedule") or {}).get(
             "newsletter-intelligence", {"hour": 6, "minute": 0}
         )
+        selected_source_id = schedule.get("connection_id", "")
         schedule_state = store.get_schedule_state(
             record.tenant_id, "newsletter-intelligence"
         )
@@ -711,6 +713,14 @@ def create_web_router(
         )
         connected_count = sum(
             item.get("status") == "verified" for item in connections
+        )
+        source_options = '<option value="">All connected sources</option>' + "".join(
+            f'<option value="{_escape(item["id"])}"'
+            f'{" selected" if item["id"] == selected_source_id else ""}>'
+            f'{_escape(item.get("provider", "Source").title())} · '
+            f'{_escape((item.get("settings") or {}).get("publication_name") or item["id"])}</option>'
+            for item in connections
+            if item.get("status") == "verified" and item.get("id")
         )
         connection_status = (
             f'<span class="status ok">{connected_count} source{"s" if connected_count != 1 else ""} connected</span>'
@@ -773,6 +783,7 @@ def create_web_router(
 <div class="grid"><section class="card"><h2>Schedule</h2><form method="post" action="/app/schedule"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
 <label>Morning hour (0–23)</label><input name="hour" type="number" min="0" max="23" value="{_escape(schedule.get("hour", 6))}" required>
 <label>Minute</label><input name="minute" type="number" min="0" max="59" value="{_escape(schedule.get("minute", 0))}" required>
+<label>Report source</label><select name="connection_id">{source_options}</select>
 <label>Time zone</label><select name="timezone" required>{_timezone_options(record.timezone)}</select><button type="submit">Save schedule</button></form></section>
 
 <section class="card"><h2>Email output</h2><form method="post" action="/app/email"><input type="hidden" name="csrf_token" value="{_escape(csrf_token)}">
@@ -897,6 +908,7 @@ def create_web_router(
         hour: int = Form(..., ge=0, le=23),
         minute: int = Form(..., ge=0, le=59),
         timezone: str = Form(..., min_length=1, max_length=128),
+        connection_id: str | None = Form(default=None, max_length=255),
     ):
         context = authenticated_form(request, csrf_token)
         if not context:
@@ -904,6 +916,21 @@ def create_web_router(
         store, session = context
         try:
             ZoneInfo(timezone)
+            record = store.get(session.tenant_id)
+            current_schedule = (record.config.get("schedule") or {}).get(
+                "newsletter-intelligence", {}
+            )
+            selected_source_id = (
+                current_schedule.get("connection_id", "")
+                if connection_id is None
+                else connection_id
+            )
+            if selected_source_id and not any(
+                item.get("id") == selected_source_id
+                and item.get("status") == "verified"
+                for item in record.config.get("connections", [])
+            ):
+                return _redirect("/app?notice=source_invalid")
             next_at = next_occurrence(
                 dt.datetime.now(dt.timezone.utc),
                 timezone,
@@ -912,7 +939,11 @@ def create_web_router(
             store.update_worker_schedule(
                 session.tenant_id,
                 "newsletter-intelligence",
-                {"hour": hour, "minute": minute},
+                {
+                    "hour": hour,
+                    "minute": minute,
+                    **({"connection_id": selected_source_id} if selected_source_id else {}),
+                },
                 timezone,
                 next_at.isoformat(),
                 actor_type="web_portal",
@@ -1187,6 +1218,15 @@ def create_web_router(
             return _redirect("/app/billing")
         if not record.sprite_name:
             return _redirect("/app?notice=run_failed")
+        schedule = (record.config.get("schedule") or {}).get(
+            "newsletter-intelligence", {}
+        )
+        source_id = schedule.get("connection_id")
+        if source_id and not any(
+            item.get("id") == source_id and item.get("status") == "verified"
+            for item in record.config.get("connections", [])
+        ):
+            return _redirect("/app?notice=run_failed")
         runner = runner_factory()
         try:
             dispatch_worker(
@@ -1194,7 +1234,7 @@ def create_web_router(
                 runner,
                 record,
                 "newsletter-intelligence",
-                {},
+                {"connection_id": source_id} if source_id else {},
                 idempotency_key,
                 delivery_handler=DeliveryCoordinator(store, runner).deliver,
             )

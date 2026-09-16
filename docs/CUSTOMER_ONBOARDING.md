@@ -14,6 +14,9 @@ terminal, JSON, SSH, or Sprite knowledge.
    When Kit is enabled, choose **Connect Kit** and complete Kit's hosted consent
    screen; no API key is pasted into Harbor.
 6. If the source shows more than one publication, choose the newsletter to analyze.
+   If more than one source is connected, choose the **Report source** in the
+   schedule. Manual runs use the same selected source; **All connected sources**
+   produces a combined report.
 7. Confirm the workspace shows **Ready**, **Connected**, and the desired next
    report time. Choose **Run Newsletter Intelligence** for the first report.
 8. Confirm the run completes and the report arrives at the configured email.

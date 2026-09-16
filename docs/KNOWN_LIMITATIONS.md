@@ -8,11 +8,11 @@
   against this deployment's Stripe test or live account.
 - The second live tenant proved isolation, but its own successful real beehiiv
   report and email delivery still require a second tenant-scoped connection.
-- Beehiiv is the only live-verified customer source in the deployed release.
-  Kit normalization, OAuth onboarding, and a tenant-scoped Composio transport
-  are implemented locally but remain disabled until the staged live checklist
-  passes. The higher plan entitlements are represented, but multi-source product
-  behavior must be verified before those plans are sold.
+- Beehiiv is the only source with a completed live report. Kit normalization,
+  OAuth onboarding, and a tenant-scoped Composio transport are deployed, and
+  the hosted Kit connection screen is reachable. Consent completion and a real
+  Kit report are still pending. The higher plan entitlements are represented,
+  but multi-source behavior must be verified before those plans are sold.
 - The privacy and terms pages are honest pre-launch placeholders and require
   final business/legal details.
 - Aggregate metrics are live, but an external alert destination has not been

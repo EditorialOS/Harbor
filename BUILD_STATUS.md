@@ -1,4 +1,4 @@
-# Build status — Harbor 1.0.0 release candidate 5
+# Build status — Harbor 1.0.0 release candidate 6
 
 Harbor's first commercial product loop is implemented. This is a release
 candidate, not a production-ready declaration; remaining gates require external
@@ -33,6 +33,8 @@ account configuration or a second customer's real data.
 - Fly HTTP and scheduler Machines are running against production Postgres
 - the pilot Sprite passed install, checkpoint, cold-wake, persistence, and real
   worker reconciliation checks
+- Kit's hosted connection screen is reachable from the pilot workspace;
+  consent completion and a real Kit report remain unverified
 - a real policy-restricted Beehiiv connector returned customer data only inside
   the pilot Sprite
 - a scheduled real-data report completed, persisted, and arrived by email

@@ -5,6 +5,7 @@ import pytest
 from harbor.scheduler import (
     DailySchedule,
     Scheduler,
+    configured_jobs,
     monitored_tick,
     next_occurrence,
     next_report_occurrence,
@@ -64,6 +65,22 @@ def test_timezone_schedule_initializes_then_runs_due_window_once(tmp_path):
 
     assert scheduler.tick(dt.datetime(2026, 9, 5, 13, 32, tzinfo=dt.timezone.utc)) == []
     assert len(runner.calls) == 1
+
+
+def test_legacy_schedule_uses_selected_source_only(tmp_path):
+    store = _scheduled_store(tmp_path)
+    store.update_worker_schedule(
+        "acme",
+        "newsletter-intelligence",
+        {"hour": 6, "minute": 30, "connection_id": "kit-acme"},
+        "America/Los_Angeles",
+        "2026-09-05T13:30:00+00:00",
+    )
+
+    jobs = configured_jobs(store.get("acme"))
+
+    assert len(jobs) == 1
+    assert jobs[0].inputs == {"connection_id": "kit-acme"}
 
 
 def test_schedule_window_key_is_stable_and_timezone_specific():

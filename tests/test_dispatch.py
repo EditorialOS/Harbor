@@ -260,3 +260,60 @@ def test_composio_connection_gets_only_a_transient_tenant_scoped_broker_grant(
     persisted = store.get("acme").config["connections"][0]["settings"]
     assert "broker_authorization" not in persisted
     assert "broker_base_url" not in persisted
+
+
+def test_selected_beehiiv_source_does_not_receive_unneeded_kit_grant(tmp_path):
+    store, _ = _store_and_tenant(tmp_path)
+    store.upsert_connection(
+        "acme",
+        {
+            "id": "bee-acme",
+            "provider": "beehiiv",
+            "status": "verified",
+            "settings": {"publication_id": "pub_acme"},
+        },
+    )
+    store.upsert_connection(
+        "acme",
+        {
+            "id": "kit-acme",
+            "provider": "kit",
+            "status": "verified",
+            "settings": {"transport": "composio", "connected_account_id": "ca_acme"},
+        },
+    )
+    tenant = store.get("acme")
+
+    spec = build_run_spec(
+        tenant,
+        "newsletter-intelligence",
+        {"connection_id": "bee-acme"},
+        "run_selected",
+        "window-selected",
+    )
+
+    assert [item["id"] for item in spec["connections"]] == ["bee-acme"]
+
+
+def test_invalid_selected_source_fails_durably(tmp_path):
+    store, tenant = _store_and_tenant(tmp_path)
+
+    class NeverCalledRunner:
+        def run(self, sprite_name, run_spec):
+            raise AssertionError("invalid source must not reach the Sprite")
+
+    with pytest.raises(RunExecutionFailed):
+        dispatch_worker(
+            store,
+            NeverCalledRunner(),
+            tenant,
+            "newsletter-intelligence",
+            {"connection_id": "other-tenant-source"},
+            "invalid-source-window",
+        )
+
+    record = store.get_run_by_idempotency(
+        "acme", "newsletter-intelligence", "invalid-source-window"
+    )
+    assert record is not None
+    assert record.status == "failed"
