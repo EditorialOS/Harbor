@@ -1,15 +1,17 @@
-# Harbor v1 launch checklist
+# Harbor v1 web launch checklist
 
-Every box must be checked with real evidence before Harbor is described as
-production-ready or opened to public paid signup.
+Every required box must be checked with real evidence before Harbor is
+described as production-ready or opened to public paid signup. Public ChatGPT
+directory distribution is a later, optional channel and is not a web-launch
+gate.
 
 ## Product
 
 - [x] Newsletter Intelligence uses real data and contains all required analysis
   sections.
 - [x] Production has no automatic mock or sample fallback.
-- [x] ChatGPT app UI covers intelligence, sources, workers, runs,
-  recommendations, run control, and connection status.
+- [x] The web workspace covers onboarding, source connection, scheduling,
+  output settings, manual runs, recent runs, and activity visibility.
 - [x] Passwordless web onboarding requires no technical setup.
 - [ ] A brand-new customer has completed the current release flow unaided.
 
@@ -43,11 +45,20 @@ production-ready or opened to public paid signup.
 - [ ] Final privacy policy, terms, support contact, refund/cancellation language,
   and business identity are approved.
 
-## Release and distribution
+## Release
 
 - [x] All tests and the Postgres contract pass on the release commit.
 - [x] The release image is deployed and schema 12 is healthy.
 - [x] Live report and email delivery pass on the release image.
-- [ ] ChatGPT app OAuth and every declared tool pass on the release image.
-- [ ] Public ChatGPT app submission materials and review requirements are met.
+- [ ] A real Kit connection and report pass on the release image.
 - [ ] Git is clean and the release commit/tag is recorded.
+
+## Optional ChatGPT distribution — post-launch
+
+These items improve distribution but do not block the Harbor web product:
+
+- [ ] ChatGPT OAuth and every declared tool pass on the current release image.
+- [ ] A private pilot customer confirms that the ChatGPT surface adds value.
+- [ ] Public plugin packaging and review materials are updated to OpenAI's
+  current submission format.
+- [ ] Harbor is submitted for review only after web-product demand is proven.

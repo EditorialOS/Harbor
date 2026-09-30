@@ -58,7 +58,7 @@ async def _lifespan(_app: FastAPI):
         yield
 
 
-app = FastAPI(title="Harbor Control Plane", version="1.0.0-rc.5", lifespan=_lifespan)
+app = FastAPI(title="Harbor Control Plane", version="1.0.0-rc.6", lifespan=_lifespan)
 app.mount("/mcp", remote_mcp.app)
 
 

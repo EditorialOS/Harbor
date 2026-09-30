@@ -13,7 +13,7 @@ The customer does not operate Python, cron, VPS scripts, or tenant JSON files. T
 
 ```text
 Customer surfaces
-ChatGPT / Codex / email / Slack / web
+web / email / ChatGPT / Codex / future surfaces
             |
             v
 +----------------------------------+
@@ -254,6 +254,13 @@ The supplied Alex architecture already requires a shared kernel, per-tenant cont
 ## Product surfaces
 
 Harbor's core product is independent of surface.
+
+### Web workspace
+
+The primary v1 customer product. It owns passwordless onboarding, source
+connection, schedule and output preferences, report access, recent-run
+visibility, and billing entry points. It remains a thin adapter over Harbor's
+control plane rather than containing worker logic.
 
 ### HTTP API
 

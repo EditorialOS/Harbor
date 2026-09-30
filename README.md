@@ -50,9 +50,9 @@ limited to tests and local development.
 
 ## Product surfaces
 
-- Web: passwordless signup, workspace provisioning, source connection,
+- Web (primary): passwordless signup, workspace provisioning, source connection,
   scheduling, email delivery, run history, billing, and service status.
-- MCP/ChatGPT: authenticated status, worker catalog, latest intelligence,
+- MCP/ChatGPT (optional): authenticated status, worker catalog, latest intelligence,
   sources, recommendations, recent runs, and idempotent worker execution.
 - Email: durable, idempotent HTML and plain-text report delivery.
 - HTTP API: tenant-scoped product operations and operator provisioning.
@@ -68,6 +68,7 @@ limited to tests and local development.
 - `docs/SPRITES_LIVE_VERIFICATION.md` — Sprite acceptance checklist
 - `docs/PRODUCTION_PLAN.md` — fixed product architecture
 - `docs/COMPOSIO_KIT_SETUP.md` — staged Kit/Composio activation and verification
+- `docs/WEB_LAUNCH_PLAN.md` — web-first release sequence and deferred channels
 
 Do not enable public paid signup until Stripe, a verified email-sending domain,
 external alerts, final legal terms, and the remaining live acceptance checks are

@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory() as td:
     assert result.status == "completed", result
     assert Path(result.deliverables[0]).exists()
     text = Path(result.deliverables[0]).read_text()
-    assert "What matters" in text and "Do next" in text
+    assert "Why it matters" in text and "Recommended actions" in text
 
 with tempfile.TemporaryDirectory() as td:
     p = Path(td) / "bad.json"

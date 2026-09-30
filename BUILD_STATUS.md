@@ -58,7 +58,7 @@ Sanitized identifiers and results are recorded in
 - rehearse a production database backup and restore
 - replace legal placeholders with approved publisher identity, policies,
   cancellation/refund terms, and public support details
-- pass the public OpenAI plugin review checklist and publish after approval
+- complete a new customer's web onboarding and a real Kit report
 
 ## Deliberately unavailable
 
@@ -67,3 +67,5 @@ Sanitized identifiers and results are recorded in
 - Alex remains non-runnable until its v3 reconciliation
 
 The authoritative remaining release gates are in `docs/LAUNCH_CHECKLIST.md`.
+Public ChatGPT directory submission is deliberately deferred until the web
+product has paying-customer evidence.
