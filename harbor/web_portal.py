@@ -71,6 +71,13 @@ button,.button{display:inline-block;border:0;border-radius:8px;padding:10px 15px
 .status{font-weight:750}.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.notice{border-left:4px solid var(--brand);padding:12px 14px;background:#eef4ff;border-radius:6px;margin:18px 0}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px 6px;border-bottom:1px solid var(--line);font-size:14px}code{overflow-wrap:anywhere}.steps li{margin:8px 0}.secret{background:#f2f4f7;border:1px solid var(--line);padding:12px;border-radius:8px;font-family:ui-monospace,monospace;overflow-wrap:anywhere}
 form.inline{display:inline}form.inline button{margin:0}.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.small{font-size:13px}
+.intelligence{background:#fff;border:1px solid var(--line);border-radius:18px;margin:24px 0;overflow:hidden;box-shadow:0 5px 18px rgba(16,35,63,.05)}
+.intelligence-head{padding:26px 28px;border-bottom:1px solid var(--line);font-size:25px;font-weight:400;letter-spacing:-.02em}.intelligence-date{color:var(--muted)}
+.intelligence-metrics,.intelligence-signals{display:grid;grid-template-columns:repeat(3,1fr);padding:22px 28px;border-bottom:1px solid var(--line)}
+.intelligence-metric,.intelligence-signal{min-width:0;padding:0 22px}.intelligence-metric:first-child,.intelligence-signal:first-child{padding-left:0}.intelligence-metric+.intelligence-metric,.intelligence-signal+.intelligence-signal{border-left:1px solid var(--line)}
+.intelligence-label{color:var(--muted);font-size:13px}.intelligence-value{margin-top:5px;font-size:26px;font-weight:600}.intelligence-signal{color:var(--muted)}.intelligence-signal .intelligence-label{color:var(--ink);margin-bottom:7px}
+.intelligence details{padding:0 28px;border-bottom:1px solid var(--line)}.intelligence summary{padding:18px 0;cursor:pointer;font-weight:650}.intelligence-detail{padding:0 0 20px;color:var(--muted)}.intelligence-detail h3{color:var(--ink);font-size:14px;margin:20px 0 6px}.intelligence-detail ul{margin:0;padding-left:20px}.intelligence-detail li{margin:7px 0}
+@media(max-width:620px){.intelligence-metrics,.intelligence-signals{grid-template-columns:1fr;padding:10px 20px}.intelligence-metric,.intelligence-signal,.intelligence-metric:first-child,.intelligence-signal:first-child{padding:14px 0}.intelligence-metric+.intelligence-metric,.intelligence-signal+.intelligence-signal{border-left:0;border-top:1px solid var(--line)}.intelligence-head{padding:22px 20px}.intelligence details{padding:0 20px}}
 </style></head><body><main><nav><div class="brand">Harbor</div></nav>"""
         + content
         + '<footer><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/support">Support</a><a href="/status">Service status</a></footer></main></body></html>',
@@ -298,6 +305,97 @@ def _notice(value: str | None) -> str:
     }
     message = messages.get(value or "")
     return f'<div class="notice">{_escape(message)}</div>' if message else ""
+
+
+def _metric_count(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "—"
+    return f"{value:,.0f}"
+
+
+def _metric_percent(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "—"
+    return f"{value * 100:.1f}%"
+
+
+def _report_date(value: str | None) -> str:
+    if not value:
+        return "Latest"
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value[:10]
+    return parsed.strftime("%b %d, %Y").replace(" 0", " ")
+
+
+def _report_list(title: str, values: Any) -> str:
+    items = values if isinstance(values, list) else []
+    if not items:
+        return ""
+    return (
+        f"<h3>{_escape(title)}</h3><ul>"
+        + "".join(f"<li>{_escape(item)}</li>" for item in items if item)
+        + "</ul>"
+    )
+
+
+def _latest_report_html(runs: list[Any]) -> str:
+    run = next(
+        (
+            item
+            for item in runs
+            if item.worker_id == "newsletter-intelligence"
+            and item.status == "completed"
+            and isinstance(item.result, dict)
+        ),
+        None,
+    )
+    if run is None:
+        return ""
+    result = run.result or {}
+    data = result.get("data") or {}
+    metrics = data.get("metrics") or {}
+    intelligence = data.get("intelligence") or data.get("derived") or {}
+    if not isinstance(metrics, dict) or not isinstance(intelligence, dict):
+        return ""
+    recent_posts = metrics.get("recent_posts") or []
+    latest = intelligence.get("latest") or (recent_posts[0] if recent_posts else {})
+    if not isinstance(latest, dict):
+        latest = {}
+    what_changed = intelligence.get("what_changed") or []
+    why_it_matters = intelligence.get("why_it_matters") or []
+    recommendations = intelligence.get("recommendations") or []
+    headline = result.get("summary") or "Your latest newsletter intelligence is ready."
+    primary_change = next((item for item in what_changed if item), headline)
+    primary_reason = next((item for item in why_it_matters if item), headline)
+    primary_action = next(
+        (item for item in recommendations if item),
+        "Run another report after the next send to build a stronger baseline.",
+    )
+    details = "".join(
+        (
+            _report_list("What changed", what_changed),
+            _report_list("Why it matters", why_it_matters),
+            _report_list("Audience and growth", intelligence.get("audience_signals")),
+            _report_list("Recommended actions", recommendations),
+            _report_list("Important anomalies", intelligence.get("anomalies")),
+        )
+    )
+    return f"""<section class="intelligence" aria-label="Latest intelligence report">
+<div class="intelligence-head">Intelligence report: <span class="intelligence-date">{_escape(_report_date(run.finished_at))}</span></div>
+<div class="intelligence-metrics">
+<div class="intelligence-metric"><div class="intelligence-label">Subscribers</div><div class="intelligence-value">{_escape(_metric_count(metrics.get("active_subscribers")))}</div></div>
+<div class="intelligence-metric"><div class="intelligence-label">Open rate</div><div class="intelligence-value">{_escape(_metric_percent(latest.get("open_rate", metrics.get("avg_open_rate"))))}</div></div>
+<div class="intelligence-metric"><div class="intelligence-label">Click rate</div><div class="intelligence-value">{_escape(_metric_percent(latest.get("click_rate", metrics.get("avg_click_rate"))))}</div></div>
+</div>
+<div class="intelligence-signals">
+<div class="intelligence-signal"><div class="intelligence-label">What changed</div>{_escape(primary_change)}</div>
+<div class="intelligence-signal"><div class="intelligence-label">Why it matters</div>{_escape(primary_reason)}</div>
+<div class="intelligence-signal"><div class="intelligence-label">Top action</div>{_escape(primary_action)}</div>
+</div>
+<details><summary>Full analysis</summary><div class="intelligence-detail">{details or '<p>No additional analysis is available yet.</p>'}</div></details>
+</section>"""
 
 
 def _requires_active_billing(store: TenantStore, record: Any) -> bool:
@@ -772,6 +870,7 @@ def create_web_router(
 <div class="grid"><div class="card"><h2>Private worker computer</h2><p>{sprite_status}</p>{provisioning_action}</div>
 <div class="card"><h2>Sources</h2><p>{connection_status}</p></div>
 <div class="card"><h2>Next report</h2><p class="status">{next_run}</p></div></div>
+{_latest_report_html(runs)}
 {billing_card}
 
 <section class="card"><h2>Connect beehiiv</h2>

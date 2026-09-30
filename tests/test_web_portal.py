@@ -314,6 +314,78 @@ def test_customer_selects_kit_for_scheduled_and_manual_reports(tmp_path, monkeyp
     ]
 
 
+def test_web_workspace_renders_latest_intelligence_without_internal_ids(
+    tmp_path, monkeypatch
+):
+    store, client = _client(tmp_path, monkeypatch)
+    record, access_key = store.create_tenant(
+        "web-report",
+        "Web Report",
+        "UTC",
+        {
+            "workers": ["newsletter-intelligence"],
+            "outputs": ["files"],
+            "connections": [],
+        },
+    )
+    store.set_sprite(record.tenant_id, "harbor-web-report")
+    assert store.claim_run(
+        "run_web_report",
+        record.tenant_id,
+        "newsletter-intelligence",
+        "web-report-window",
+    )
+    store.begin_run_attempt("run_web_report")
+    store.finish_run(
+        "run_web_report",
+        "completed",
+        {
+            "status": "completed",
+            "summary": "Open performance softened on the latest issue.",
+            "data": {
+                "metrics": {
+                    "active_subscribers": 3120,
+                    "avg_open_rate": 0.47,
+                    "avg_click_rate": 0.032,
+                    "recent_posts": [
+                        {
+                            "publication_id": "internal-provider-id",
+                            "open_rate": 0.44,
+                            "click_rate": 0.03,
+                        }
+                    ],
+                },
+                "derived": {
+                    "what_changed": ["The latest issue opened below its baseline."],
+                    "why_it_matters": ["The subject framing may be losing strength."],
+                    "audience_signals": ["The active audience is stable."],
+                    "recommendations": ["Test a clearer subject-line promise."],
+                    "anomalies": ["Review <script>alert(1)</script> before acting."],
+                },
+            },
+        },
+    )
+
+    client.post(
+        "/login",
+        data={"tenant_id": record.tenant_id, "access_key": access_key},
+        follow_redirects=False,
+    )
+    dashboard = client.get("/app")
+
+    assert dashboard.status_code == 200
+    assert "Intelligence report:" in dashboard.text
+    assert "3,120" in dashboard.text
+    assert "44.0%" in dashboard.text
+    assert "3.0%" in dashboard.text
+    assert "The latest issue opened below its baseline." in dashboard.text
+    assert "Test a clearer subject-line promise." in dashboard.text
+    assert "Full analysis" in dashboard.text
+    assert "internal-provider-id" not in dashboard.text
+    assert "<script>alert(1)</script>" not in dashboard.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in dashboard.text
+
+
 def test_customer_connects_kit_with_hosted_oauth_and_no_secret_form(
     tmp_path, monkeypatch
 ):
